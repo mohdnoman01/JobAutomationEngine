@@ -16,6 +16,8 @@ class Job(BaseModel):
     url: str
     location: Optional[str] = None
     description: Optional[str] = None
+    source: Optional[str] = None
+    employment_type: Optional[str] = None
 
 class ResearchResult(BaseModel):
     company_name: str
