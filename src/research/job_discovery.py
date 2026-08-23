@@ -20,13 +20,21 @@ def discover_jobs(company: Company) -> list[Job]:
         return GreenhouseParser().parse_jobs(html, company, company.careers_url)
 
     if ats == "lever":
-        return LeverParser().parse_jobs(html, company, company.careers_url)
-        
+        return LeverParser().parse_jobs(
+        html,
+        company,
+        company.careers_url
+        )
+
         print(f"[research] Lever parser not implemented yet for {company.name}")
         return []
 
     if ats == "ashby":
-        AshbyParser()
+        return AshbyParser().parse_jobs(
+        html,
+        company,
+        company.careers_url
+        )
         print(f"[research] Ashby parser not implemented yet for {company.name}")
         return []
 
