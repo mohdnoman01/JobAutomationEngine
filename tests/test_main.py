@@ -1,6 +1,9 @@
+import csv
 from pathlib import Path
 
 from src.main import main
+from src.research.company_loader import load_companies
+from src.research.models import Company, Contact, Job, ResearchResult
 
 
 def test_main_runs_pipeline_with_default_output_paths(monkeypatch, capsys):
@@ -81,3 +84,73 @@ def test_main_returns_nonzero_when_pipeline_fails(monkeypatch, capsys):
 
     assert exit_code == 1
     assert capsys.readouterr().err == "Pipeline failed: companies file is invalid\n"
+
+
+def test_project_companies_csv_has_five_fields_and_loads():
+    companies_path = Path("data/input/companies.csv")
+
+    with companies_path.open("r", newline="", encoding="utf-8") as file:
+        rows = list(csv.reader(file))
+
+    assert rows[0] == [
+        "name",
+        "website",
+        "careers_url",
+        "industry",
+        "location",
+    ]
+    assert all(len(row) == 5 for row in rows[1:])
+
+    companies = load_companies(str(companies_path))
+
+    assert len(companies) == len(rows) - 1
+    assert all(isinstance(company, Company) for company in companies)
+
+
+def test_main_runs_pipeline_with_project_companies_input(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "src.orchestrator.research_company",
+        lambda company: ResearchResult(
+            company_name=company.name,
+            url=company.website or "",
+            text="Example company",
+            contacts=[
+                Contact(
+                    email="hiring@example.com",
+                    company=company.name,
+                    source="test",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.orchestrator.discover_jobs",
+        lambda company: [
+            Job(
+                title="Example Engineer",
+                company=company.name,
+                url="https://example.com/jobs/engineer",
+            )
+        ],
+    )
+
+    applications_path = tmp_path / "applications.json"
+    drafts_path = tmp_path / "email_drafts.json"
+
+    exit_code = main(
+        [
+            "--companies",
+            "data/input/companies.csv",
+            "--applications-path",
+            str(applications_path),
+            "--drafts-path",
+            str(drafts_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert applications_path.exists()
+    assert drafts_path.exists()
+    assert capsys.readouterr().out == (
+        "Pipeline complete: companies=10, jobs=10, applications=1, drafts=1\n"
+    )

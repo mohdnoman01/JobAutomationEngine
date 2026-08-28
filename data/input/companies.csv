@@ -1,2 +1,11 @@
 name,website,careers_url,industry,location
-Example,https://example.com,https://example.com,Technology,Remote
+Google,https://www.google.com,https://www.google.com/about/careers/applications/jobs/results/?hl=en_US,"Technology","Bengaluru, India"
+Microsoft,https://www.microsoft.com,https://jobs.careers.microsoft.com/global/en/search,"Technology","India"
+Amazon,https://www.amazon.com,https://www.amazon.jobs/en/search?base_query=SDE&country=IND&loc_query=India,"E-commerce","India"
+Atlassian,https://www.atlassian.com,https://www.atlassian.com/company/careers/all-jobs,"Software","Bengaluru, India / Remote"
+PhonePe,https://www.phonepe.com,https://www.phonepe.com/careers/job-openings/,"Fintech","Bengaluru, India"
+Razorpay,https://razorpay.com,https://razorpay.com/careers/,"Fintech","Bengaluru, India"
+Zoho,https://www.zoho.com,https://www.zoho.com/careers/,"Software","Chennai, India"
+Canonical,https://canonical.com,https://canonical.com/careers/all?search=software,"Open Source","Remote Worldwide"
+GitLab,https://about.gitlab.com,https://about.gitlab.com/jobs/,"DevSecOps","Remote"
+Airbnb,https://www.airbnb.com,https://careers.airbnb.com/positions/,"Travel Technology","India / Remote"
