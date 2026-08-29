@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from src.orchestrator import run_pipeline
+from src.research.scraper import HttpPerformanceMetrics
 
 
 DEFAULT_APPLICATIONS_PATH = Path("data/output/applications.json")
@@ -41,18 +42,49 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CONTACTS_PATH,
         help="Path for persisted research contacts.",
     )
+    parser.add_argument(
+        "--http-performance",
+        action="store_true",
+        help="Print a concise HTTP request performance summary.",
+    )
     return parser
+
+
+def format_http_performance(metrics: HttpPerformanceMetrics) -> str:
+    summary = metrics.summary()
+    message = (
+        "HTTP performance: "
+        f"requests={summary.requests}, "
+        f"cache_hits={summary.cache_hits}, "
+        f"failures={summary.failures}, "
+        f"network_time={summary.network_time_seconds:.2f}s"
+    )
+
+    if summary.slowest_request is not None:
+        message += (
+            f", slowest={summary.slowest_request.url} "
+            f"({summary.slowest_request.elapsed_seconds:.2f}s)"
+        )
+
+    return message
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    http_metrics = HttpPerformanceMetrics() if args.http_performance else None
 
     try:
+        pipeline_arguments = {
+            "applications_path": args.applications_path,
+            "contacts_path": args.contacts_path,
+            "drafts_path": args.drafts_path,
+        }
+        if http_metrics is not None:
+            pipeline_arguments["http_metrics"] = http_metrics
+
         summary = run_pipeline(
             args.companies,
-            applications_path=args.applications_path,
-            contacts_path=args.contacts_path,
-            drafts_path=args.drafts_path,
+            **pipeline_arguments,
         )
     except Exception as exc:
         print(f"Pipeline failed: {exc}", file=sys.stderr)
@@ -65,6 +97,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"applications={summary['applications_created']}, "
         f"drafts={summary['drafts_created']}"
     )
+    if http_metrics is not None:
+        print(format_http_performance(http_metrics))
     return 0
 
 

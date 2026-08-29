@@ -17,7 +17,7 @@ from src.email.templates import create_outreach_email
 from src.research.company_loader import load_companies
 from src.research.company_researcher import research_company
 from src.research.job_discovery import discover_jobs
-from src.research.scraper import PageFetcher
+from src.research.scraper import HttpPerformanceMetrics, PageFetcher
 
 
 def run_pipeline(
@@ -26,12 +26,13 @@ def run_pipeline(
     applications_path: str | Path = "data/output/applications.json",
     contacts_path: str | Path = "data/output/contacts.json",
     drafts_path: str | Path = "data/output/email_drafts.json",
+    http_metrics: HttpPerformanceMetrics | None = None,
 ) -> dict[str, int]:
     companies = load_companies(str(companies_path))
 
     application_tracker = ApplicationTracker(applications_path)
     draft_manager = EmailDraftManager(drafts_path)
-    page_fetcher = PageFetcher()
+    page_fetcher = PageFetcher(metrics=http_metrics)
     saved_contacts = load_contacts(contacts_path)
     saved_contact_keys = {
         (contact.company, contact.email)

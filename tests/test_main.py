@@ -1,7 +1,8 @@
 import csv
 from pathlib import Path
 
-from src.main import main
+from src.main import format_http_performance, main
+from src.research.scraper import HttpPerformanceMetrics
 from src.research.company_loader import load_companies
 from src.research.models import Company, Contact, Job, ResearchResult
 
@@ -88,6 +89,50 @@ def test_main_returns_nonzero_when_pipeline_fails(monkeypatch, capsys):
 
     assert exit_code == 1
     assert capsys.readouterr().err == "Pipeline failed: companies file is invalid\n"
+
+
+def test_main_optionally_prints_http_performance(monkeypatch, capsys):
+    def fake_run_pipeline(companies_path, **kwargs):
+        assert companies_path == Path("companies.csv")
+        metrics = kwargs["http_metrics"]
+        assert isinstance(metrics, HttpPerformanceMetrics)
+        metrics.record_network_request(
+            "https://example.com/careers",
+            1.25,
+            success=True,
+            status_code=200,
+        )
+        metrics.record_cache_hit()
+        return {
+            "companies_processed": 1,
+            "jobs_discovered": 2,
+            "applications_created": 0,
+            "drafts_created": 0,
+        }
+
+    monkeypatch.setattr("src.main.run_pipeline", fake_run_pipeline)
+
+    exit_code = main(["--companies", "companies.csv", "--http-performance"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == (
+        "Pipeline complete: companies=1, jobs=2, applications=0, drafts=0\n"
+        "HTTP performance: requests=1, cache_hits=1, failures=0, "
+        "network_time=1.25s, slowest=https://example.com/careers (1.25s)\n"
+    )
+
+
+def test_http_performance_redacts_sensitive_query_values():
+    metrics = HttpPerformanceMetrics()
+    metrics.record_network_request(
+        "https://example.com/jobs?team=android&token=secret",
+        0.5,
+        success=True,
+        status_code=200,
+    )
+
+    assert "secret" not in format_http_performance(metrics)
+    assert "token=REDACTED" in format_http_performance(metrics)
 
 
 def test_project_companies_csv_has_five_fields_and_loads():
