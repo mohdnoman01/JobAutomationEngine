@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.applications.tracker import ApplicationTracker
+from src.applications.tracker import (
+    ApplicationTracker,
+    load_contacts,
+    save_contacts,
+)
 from src.email.manager import EmailDraftManager
+from src.email.outreach_policy import select_best_contact, select_relevant_job
 from src.email.templates import create_outreach_email
 from src.research.company_loader import load_companies
 from src.research.company_researcher import research_company
@@ -14,12 +19,19 @@ def run_pipeline(
     companies_path: str | Path,
     *,
     applications_path: str | Path = "data/output/applications.json",
+    contacts_path: str | Path = "data/output/contacts.json",
     drafts_path: str | Path = "data/output/email_drafts.json",
 ) -> dict[str, int]:
     companies = load_companies(str(companies_path))
 
     application_tracker = ApplicationTracker(applications_path)
     draft_manager = EmailDraftManager(drafts_path)
+    saved_contacts = load_contacts(contacts_path)
+    saved_contact_keys = {
+        (contact.company, contact.email)
+        for contact in saved_contacts
+    }
+    contacts_changed = False
 
     companies_processed = 0
     jobs_discovered = 0
@@ -36,6 +48,16 @@ def run_pipeline(
             print(f"[pipeline] {company.name}: failed - {exc}")
             continue
 
+        for contact in research.contacts:
+            contact_key = (contact.company, contact.email)
+
+            if contact_key in saved_contact_keys:
+                continue
+
+            saved_contact_keys.add(contact_key)
+            saved_contacts.append(contact)
+            contacts_changed = True
+
         jobs_discovered += len(jobs)
 
         for job in jobs:
@@ -49,22 +71,21 @@ def run_pipeline(
                 )
                 applications_created += 1
 
-            for contact in research.contacts:
-                if not contact.email:
-                    continue
+        contact = select_best_contact(research.contacts)
+        job = select_relevant_job(jobs)
 
-                email = create_outreach_email(
-                    job,
-                    company,
-                    contact,
-                )
+        if contact is not None and job is not None:
+            email = create_outreach_email(job, company, contact)
 
-                try:
-                    draft_manager.add(email)
-                except ValueError:
-                    continue
-
+            try:
+                draft_manager.add(email)
+            except ValueError:
+                pass
+            else:
                 drafts_created += 1
+
+    if contacts_changed:
+        save_contacts(saved_contacts, contacts_path)
 
     return {
         "companies_processed": companies_processed,

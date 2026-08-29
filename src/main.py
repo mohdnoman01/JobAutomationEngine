@@ -9,6 +9,7 @@ from src.orchestrator import run_pipeline
 
 
 DEFAULT_APPLICATIONS_PATH = Path("data/output/applications.json")
+DEFAULT_CONTACTS_PATH = Path("data/output/contacts.json")
 DEFAULT_DRAFTS_PATH = Path("data/output/email_drafts.json")
 
 
@@ -34,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DRAFTS_PATH,
         help="Path for persisted email drafts.",
     )
+    parser.add_argument(
+        "--contacts-path",
+        type=Path,
+        default=DEFAULT_CONTACTS_PATH,
+        help="Path for persisted research contacts.",
+    )
     return parser
 
 
@@ -44,6 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary = run_pipeline(
             args.companies,
             applications_path=args.applications_path,
+            contacts_path=args.contacts_path,
             drafts_path=args.drafts_path,
         )
     except Exception as exc:

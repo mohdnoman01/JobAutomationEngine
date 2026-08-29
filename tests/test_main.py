@@ -28,6 +28,7 @@ def test_main_runs_pipeline_with_default_output_paths(monkeypatch, capsys):
             Path("data/input/companies.csv"),
             {
                 "applications_path": Path("data/output/applications.json"),
+                "contacts_path": Path("data/output/contacts.json"),
                 "drafts_path": Path("data/output/email_drafts.json"),
             },
         )
@@ -59,6 +60,8 @@ def test_main_allows_output_path_overrides(monkeypatch):
             "custom/applications.json",
             "--drafts-path",
             "custom/drafts.json",
+            "--contacts-path",
+            "custom/contacts.json",
         ]
     )
 
@@ -68,6 +71,7 @@ def test_main_allows_output_path_overrides(monkeypatch):
             Path("companies.csv"),
             {
                 "applications_path": Path("custom/applications.json"),
+                "contacts_path": Path("custom/contacts.json"),
                 "drafts_path": Path("custom/drafts.json"),
             },
         )
@@ -135,6 +139,7 @@ def test_main_runs_pipeline_with_project_companies_input(tmp_path, monkeypatch, 
     )
 
     applications_path = tmp_path / "applications.json"
+    contacts_path = tmp_path / "contacts.json"
     drafts_path = tmp_path / "email_drafts.json"
 
     exit_code = main(
@@ -145,11 +150,14 @@ def test_main_runs_pipeline_with_project_companies_input(tmp_path, monkeypatch, 
             str(applications_path),
             "--drafts-path",
             str(drafts_path),
+            "--contacts-path",
+            str(contacts_path),
         ]
     )
 
     assert exit_code == 0
     assert applications_path.exists()
+    assert contacts_path.exists()
     assert drafts_path.exists()
     assert capsys.readouterr().out == (
         "Pipeline complete: companies=10, jobs=10, applications=1, drafts=1\n"
