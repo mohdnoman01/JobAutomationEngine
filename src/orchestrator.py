@@ -17,6 +17,7 @@ from src.email.templates import create_outreach_email
 from src.research.company_loader import load_companies
 from src.research.company_researcher import research_company
 from src.research.job_discovery import discover_jobs
+from src.research.scraper import PageFetcher
 
 
 def run_pipeline(
@@ -30,6 +31,7 @@ def run_pipeline(
 
     application_tracker = ApplicationTracker(applications_path)
     draft_manager = EmailDraftManager(drafts_path)
+    page_fetcher = PageFetcher()
     saved_contacts = load_contacts(contacts_path)
     saved_contact_keys = {
         (contact.company, contact.email)
@@ -50,8 +52,8 @@ def run_pipeline(
         companies_processed += 1
 
         try:
-            research = research_company(company)
-            jobs = discover_jobs(company)
+            research = research_company(company, page_fetcher=page_fetcher)
+            jobs = discover_jobs(company, page_fetcher=page_fetcher)
         except Exception as exc:
             print(f"[pipeline] {company.name}: failed - {exc}")
             continue

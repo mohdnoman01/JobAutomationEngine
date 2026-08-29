@@ -1,5 +1,9 @@
+import time
+
 from src.research import company_researcher
+from src.research.job_discovery import discover_jobs
 from src.research.models import Company
+from src.research.scraper import PageFetcher
 
 
 def test_research_company_discovers_contacts(monkeypatch):
@@ -66,3 +70,62 @@ def test_research_company_checks_relevant_same_domain_pages(monkeypatch):
         ("talent@example.com", "https://example.com/careers/openings"),
     ]
     assert all(contact.discovery_type == "same_domain_page" for contact in result.contacts)
+
+
+def test_research_company_skips_failed_candidate_page(capsys):
+    company = Company(name="Test Startup", website="https://example.com")
+
+    def request(url):
+        if url == "https://example.com/":
+            return '<a href="/contact">Contact</a>'
+        raise RuntimeError("not found")
+
+    result = company_researcher.research_company(company, PageFetcher(request))
+
+    assert result.contacts == []
+    assert "skipped https://example.com/contact - not found" in capsys.readouterr().out
+
+
+def test_candidate_results_are_processed_in_discovery_order():
+    company = Company(name="Test Startup", website="https://example.com")
+
+    def request(url):
+        if url == "https://example.com/":
+            return (
+                '<a href="/careers">Careers</a>'
+                '<a href="/contact">Contact</a>'
+            )
+        if url == "https://example.com/careers":
+            time.sleep(0.02)
+            return "careers@example.com"
+        return "contact@example.com"
+
+    result = company_researcher.research_company(company, PageFetcher(request))
+
+    assert [contact.email for contact in result.contacts] == [
+        "careers@example.com",
+        "contact@example.com",
+    ]
+
+
+def test_research_and_job_discovery_share_cached_careers_response():
+    company = Company(
+        name="Test Startup",
+        website="https://example.com",
+        careers_url="https://example.com/careers",
+    )
+    requested_urls = []
+
+    def request(url):
+        requested_urls.append(url)
+        if url == "https://example.com/":
+            return '<a href="/careers">Careers</a>'
+        return '<a href="/jobs/123">Android Engineer</a>'
+
+    page_fetcher = PageFetcher(request)
+
+    company_researcher.research_company(company, page_fetcher)
+    jobs = discover_jobs(company, page_fetcher)
+
+    assert [job.url for job in jobs] == ["https://example.com/jobs/123"]
+    assert requested_urls.count("https://example.com/careers") == 1

@@ -45,13 +45,9 @@ ROLE_PATTERNS = (
     ("Human Resources", re.compile(r"\b(?:human[\s-]?resources|hr)\b", re.I)),
     ("Hiring", re.compile(r"\bhiring\b", re.I)),
 )
-COMMON_CONTACT_PATHS = (
+FALLBACK_CONTACT_PATHS = (
     "/careers",
-    "/jobs",
-    "/about",
     "/contact",
-    "/team",
-    "/company",
 )
 MAX_CONTACT_PAGES = 12
 
@@ -140,9 +136,6 @@ def discover_relevant_pages(html: str, website_url: str) -> list[str]:
         seen_urls.add(normalized_url)
         pages.append(normalized_url)
 
-    for path in COMMON_CONTACT_PATHS:
-        add_if_same_host(urljoin(root_url, path))
-
     soup = BeautifulSoup(html, "html.parser")
 
     for link in soup.find_all("a", href=True):
@@ -151,6 +144,10 @@ def discover_relevant_pages(html: str, website_url: str) -> list[str]:
 
         if RELEVANT_LINK_PATTERN.search(link_context):
             add_if_same_host(url)
+
+    if not pages:
+        for path in FALLBACK_CONTACT_PATHS:
+            add_if_same_host(urljoin(root_url, path))
 
     return pages
 

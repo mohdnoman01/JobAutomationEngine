@@ -40,7 +40,7 @@ def test_pipeline_creates_application_and_email_draft(
 
     monkeypatch.setattr(
         "src.orchestrator.research_company",
-        lambda _: ResearchResult(
+        lambda _, **__: ResearchResult(
             company_name="Test Startup",
             url="https://example.com",
             text="Test company",
@@ -50,7 +50,7 @@ def test_pipeline_creates_application_and_email_draft(
 
     monkeypatch.setattr(
         "src.orchestrator.discover_jobs",
-        lambda _: [job],
+        lambda _, **__: [job],
     )
 
     applications_path = tmp_path / "applications.json"
@@ -109,7 +109,7 @@ def test_pipeline_does_not_duplicate_existing_records(
 
     monkeypatch.setattr(
         "src.orchestrator.research_company",
-        lambda _: ResearchResult(
+        lambda _, **__: ResearchResult(
             company_name="Test Startup",
             url="https://example.com",
             text="Test company",
@@ -119,7 +119,7 @@ def test_pipeline_does_not_duplicate_existing_records(
 
     monkeypatch.setattr(
         "src.orchestrator.discover_jobs",
-        lambda _: [job],
+        lambda _, **__: [job],
     )
 
     applications_path = tmp_path / "applications.json"
@@ -191,14 +191,14 @@ def test_pipeline_creates_one_draft_for_the_best_contact_and_job(
     ]
     monkeypatch.setattr(
         "src.orchestrator.research_company",
-        lambda _: ResearchResult(
+        lambda _, **__: ResearchResult(
             company_name=company.name,
             url=company.website or "",
             text="Test company",
             contacts=contacts,
         ),
     )
-    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _: jobs)
+    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _, **__: jobs)
 
     applications_path = tmp_path / "applications.json"
     contacts_path = tmp_path / "contacts.json"
@@ -257,14 +257,14 @@ def test_pipeline_creates_no_draft_without_an_eligible_contact(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         "src.orchestrator.research_company",
-        lambda _: ResearchResult(
+        lambda _, **__: ResearchResult(
             company_name=company.name,
             url=company.website or "",
             text="Test company",
             contacts=contacts,
         ),
     )
-    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _: [job])
+    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _, **__: [job])
 
     contacts_path = tmp_path / "contacts.json"
     drafts_path = tmp_path / "email_drafts.json"

@@ -8,15 +8,19 @@ from src.research.parsers import (
     GreenhouseParser,
     LeverParser,
 )
-from src.research.scraper import fetch_page
+from src.research.scraper import PageFetcher, fetch_page
 
 
-def discover_jobs(company: Company) -> list[Job]:
+def discover_jobs(
+    company: Company,
+    page_fetcher: PageFetcher | None = None,
+) -> list[Job]:
     if not company.careers_url:
         print(f"[research] {company.name}: missing careers_url")
         return []
 
-    html = fetch_page(company.careers_url)
+    fetch = page_fetcher.fetch if page_fetcher else fetch_page
+    html = fetch(company.careers_url)
     ats = detect_ats(company.careers_url, html)
 
     print(f"[research] {company.name}: detected ATS = {ats}")

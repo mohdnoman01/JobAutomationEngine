@@ -114,7 +114,7 @@ def test_project_companies_csv_has_five_fields_and_loads():
 def test_main_runs_pipeline_with_project_companies_input(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "src.orchestrator.research_company",
-        lambda company: ResearchResult(
+        lambda company, **_: ResearchResult(
             company_name=company.name,
             url=company.website or "",
             text="Example company",
@@ -129,7 +129,7 @@ def test_main_runs_pipeline_with_project_companies_input(tmp_path, monkeypatch, 
     )
     monkeypatch.setattr(
         "src.orchestrator.discover_jobs",
-        lambda company: [
+        lambda company, **_: [
             Job(
                 title="Example Engineer",
                 company=company.name,

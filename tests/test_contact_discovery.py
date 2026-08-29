@@ -112,11 +112,29 @@ def test_discover_relevant_pages_keeps_same_host_relevant_links_only():
 
     pages = discover_relevant_pages(html, "https://example.com")
 
-    assert "https://example.com/careers" in pages
-    assert "https://example.com/careers/openings" in pages
-    assert "https://example.com/blog" not in pages
-    assert "https://external.example/jobs" not in pages
-    assert "https://www.linkedin.com/company/example" not in pages
+    assert pages == ["https://example.com/careers/openings"]
+
+
+def test_discover_relevant_pages_uses_small_fallback_without_relevant_links():
+    pages = discover_relevant_pages("<a href=\"/blog\">Blog</a>", "https://example.com")
+
+    assert pages == [
+        "https://example.com/careers",
+        "https://example.com/contact",
+    ]
+
+
+def test_discover_relevant_pages_keeps_the_contact_page_limit():
+    html = "".join(
+        f'<a href="/careers/{index}">Careers {index}</a>'
+        for index in range(20)
+    )
+
+    pages = discover_relevant_pages(html, "https://example.com")
+
+    assert len(pages) == 12
+    assert pages[0] == "https://example.com/careers/0"
+    assert pages[-1] == "https://example.com/careers/11"
 
 
 def test_deduplicate_contacts_prefers_role_specific_contact():
