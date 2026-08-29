@@ -229,6 +229,13 @@ def test_pipeline_creates_one_draft_for_the_best_contact_and_job(
     assert {contact.email for contact in load_contacts(contacts_path)} == {
         contact.email for contact in contacts
     }
+    persisted_contacts = load_contacts(contacts_path)
+    assert {contact.qualification.value for contact in persisted_contacts} == {
+        "eligible",
+        "uncertain",
+        "rejected",
+    }
+    assert all(contact.qualification_reason for contact in persisted_contacts)
 
 
 def test_pipeline_creates_no_draft_without_an_eligible_contact(tmp_path, monkeypatch):

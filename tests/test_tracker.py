@@ -10,7 +10,7 @@ from src.applications.tracker import (
     save_applications,
     save_contacts,
 )
-from src.research.models import Contact
+from src.research.models import Contact, ContactQualification
 
 
 def test_application_persistence(tmp_path):
@@ -44,7 +44,10 @@ def test_contact_persistence(tmp_path):
             email="recruiter@example.com",
             role="Recruiter",
             company="Test Startup",
-            source="manual",
+            source="https://example.com/careers",
+            discovery_type="same_domain_page",
+            qualification=ContactQualification.eligible,
+            qualification_reason="eligible_role:recruit",
         )
     ]
 
@@ -54,6 +57,7 @@ def test_contact_persistence(tmp_path):
 
     assert len(loaded) == 1
     assert loaded[0] == contacts[0]
+    assert loaded[0].source_url == "https://example.com/careers"
 
 
 def test_missing_files_return_empty_lists(tmp_path):

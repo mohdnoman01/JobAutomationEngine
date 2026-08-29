@@ -30,6 +30,8 @@ def test_research_company_discovers_contacts(monkeypatch):
     assert len(result.contacts) == 1
     assert result.contacts[0].email == "hiring@example.com"
     assert result.contacts[0].company == "Test Startup"
+    assert result.contacts[0].source_url == "https://example.com"
+    assert result.contacts[0].discovery_type == "homepage"
 
 
 def test_research_company_checks_relevant_same_domain_pages(monkeypatch):
@@ -63,3 +65,4 @@ def test_research_company_checks_relevant_same_domain_pages(monkeypatch):
         ("hello@example.com", "https://example.com/careers/openings"),
         ("talent@example.com", "https://example.com/careers/openings"),
     ]
+    assert all(contact.discovery_type == "same_domain_page" for contact in result.contacts)

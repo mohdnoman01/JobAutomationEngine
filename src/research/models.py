@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from enum import StrEnum
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class Company(BaseModel):
@@ -19,12 +21,29 @@ class Job(BaseModel):
     employment_type: str | None = None
 
 
+class ContactQualification(StrEnum):
+    eligible = "eligible"
+    uncertain = "uncertain"
+    rejected = "rejected"
+
+
 class Contact(BaseModel):
     name: str | None = None
     email: str
     role: str | None = None
     company: str
     source: str | None = None
+    source_url: str | None = None
+    discovery_type: str = "public_page"
+    qualification: ContactQualification | None = None
+    qualification_reason: str | None = None
+
+    @model_validator(mode="after")
+    def populate_source_url_from_legacy_source(self) -> "Contact":
+        if self.source_url is None and self.source and self.source.startswith(("http://", "https://")):
+            self.source_url = self.source
+
+        return self
 
 
 class ResearchResult(BaseModel):

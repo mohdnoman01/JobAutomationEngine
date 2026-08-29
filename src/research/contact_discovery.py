@@ -82,6 +82,7 @@ def discover_contacts(
     text: str,
     company: Company,
     source: str = "public_page",
+    discovery_type: str = "public_page",
 ) -> list[Contact]:
     contacts: list[Contact] = []
     seen_emails: set[str] = set()
@@ -100,6 +101,8 @@ def discover_contacts(
                 company=company.name,
                 role=_infer_role(text, match.start(), match.end()),
                 source=source,
+                source_url=source if source.startswith(("http://", "https://")) else None,
+                discovery_type=discovery_type,
             )
         )
 

@@ -23,6 +23,8 @@ def test_discover_contacts_extracts_public_emails():
     assert contacts[1].email == "hello@example.com"
     assert contacts[0].company == "Test Startup"
     assert contacts[0].source == "public_page"
+    assert contacts[0].source_url is None
+    assert contacts[0].discovery_type == "public_page"
 
 
 def test_discover_contacts_removes_duplicates():
@@ -64,6 +66,8 @@ def test_discover_contacts_extracts_email_from_html_with_source_and_role():
     assert contacts[0].company == "Test Startup"
     assert contacts[0].role == "Talent"
     assert contacts[0].source == "https://example.com/careers"
+    assert contacts[0].source_url == "https://example.com/careers"
+    assert contacts[0].discovery_type == "public_page"
 
 
 @pytest.mark.parametrize(

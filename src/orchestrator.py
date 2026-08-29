@@ -8,7 +8,11 @@ from src.applications.tracker import (
     save_contacts,
 )
 from src.email.manager import EmailDraftManager
-from src.email.outreach_policy import select_best_contact, select_relevant_job
+from src.email.outreach_policy import (
+    annotate_contact,
+    select_best_contact,
+    select_relevant_job,
+)
 from src.email.templates import create_outreach_email
 from src.research.company_loader import load_companies
 from src.research.company_researcher import research_company
@@ -31,6 +35,10 @@ def run_pipeline(
         (contact.company, contact.email)
         for contact in saved_contacts
     }
+    saved_contact_indexes = {
+        (contact.company, contact.email): index
+        for index, contact in enumerate(saved_contacts)
+    }
     contacts_changed = False
 
     companies_processed = 0
@@ -49,13 +57,21 @@ def run_pipeline(
             continue
 
         for contact in research.contacts:
-            contact_key = (contact.company, contact.email)
+            audited_contact = annotate_contact(contact)
+            contact_key = (audited_contact.company, audited_contact.email)
 
             if contact_key in saved_contact_keys:
+                index = saved_contact_indexes[contact_key]
+
+                if saved_contacts[index] != audited_contact:
+                    saved_contacts[index] = audited_contact
+                    contacts_changed = True
+
                 continue
 
             saved_contact_keys.add(contact_key)
-            saved_contacts.append(contact)
+            saved_contact_indexes[contact_key] = len(saved_contacts)
+            saved_contacts.append(audited_contact)
             contacts_changed = True
 
         jobs_discovered += len(jobs)

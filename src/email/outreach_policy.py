@@ -1,16 +1,9 @@
 from __future__ import annotations
 
 import re
-from enum import StrEnum
 
 from src.research.contact_discovery import ASSET_FILE_EXTENSIONS
-from src.research.models import Contact, Job
-
-
-class ContactQualification(StrEnum):
-    eligible = "eligible"
-    uncertain = "uncertain"
-    rejected = "rejected"
+from src.research.models import Contact, ContactQualification, Job
 
 
 ELIGIBLE_TERMS = ("recruit", "talent", "human resources", "hr", "hiring")
@@ -54,33 +47,58 @@ def _contains_term(value: str, terms: tuple[str, ...]) -> bool:
     return any(term in value for term in terms)
 
 
+def _first_matching_term(value: str, terms: tuple[str, ...]) -> str | None:
+    return next((term for term in terms if term in value), None)
+
+
 def _is_asset_address(email: str) -> bool:
     _, domain = _email_parts(email)
     suffix = domain.rsplit(".", maxsplit=1)[-1]
     return suffix in ASSET_FILE_EXTENSIONS
 
 
-def qualify_contact(contact: Contact) -> ContactQualification:
+def classify_contact(contact: Contact) -> tuple[ContactQualification, str]:
     """Classify a discovered contact without removing it from research data."""
     local_part, domain = _email_parts(contact.email)
     role = (contact.role or "").casefold()
     combined = f"{local_part} {domain} {role}"
 
-    if (
-        _is_asset_address(contact.email)
-        or domain in PLACEHOLDER_DOMAINS
-        or local_part in PLACEHOLDER_LOCAL_PARTS
-        or _contains_term(combined, REJECTED_TERMS)
-    ):
-        return ContactQualification.rejected
+    if _is_asset_address(contact.email):
+        return ContactQualification.rejected, "asset_file_extension"
 
-    if _contains_term(f"{local_part} {role}", ELIGIBLE_TERMS):
-        return ContactQualification.eligible
+    if domain in PLACEHOLDER_DOMAINS or local_part in PLACEHOLDER_LOCAL_PARTS:
+        return ContactQualification.rejected, "placeholder_address"
+
+    rejected_term = _first_matching_term(combined, REJECTED_TERMS)
+    if rejected_term:
+        return ContactQualification.rejected, f"rejected_term:{rejected_term}"
+
+    role_term = _first_matching_term(role, ELIGIBLE_TERMS)
+    if role_term:
+        return ContactQualification.eligible, f"eligible_role:{role_term}"
+
+    address_term = _first_matching_term(local_part, ELIGIBLE_TERMS)
+    if address_term:
+        return ContactQualification.eligible, f"eligible_address:{address_term}"
 
     if PERSONAL_ADDRESS_PATTERN.fullmatch(local_part):
-        return ContactQualification.uncertain
+        return ContactQualification.uncertain, "personal_looking_address"
 
-    return ContactQualification.uncertain
+    return ContactQualification.uncertain, "no_recruiting_evidence"
+
+
+def qualify_contact(contact: Contact) -> ContactQualification:
+    return classify_contact(contact)[0]
+
+
+def annotate_contact(contact: Contact) -> Contact:
+    qualification, reason = classify_contact(contact)
+    return contact.model_copy(
+        update={
+            "qualification": qualification,
+            "qualification_reason": reason,
+        }
+    )
 
 
 def _eligible_contact_score(contact: Contact) -> int:

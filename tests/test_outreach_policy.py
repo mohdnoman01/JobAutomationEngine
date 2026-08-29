@@ -2,6 +2,8 @@ import pytest
 
 from src.email.outreach_policy import (
     ContactQualification,
+    annotate_contact,
+    classify_contact,
     qualify_contact,
     rank_eligible_contacts,
     select_best_contact,
@@ -33,6 +35,18 @@ def make_contact(email: str, role: str | None = None) -> Contact:
 )
 def test_qualify_contact(contact, expected):
     assert qualify_contact(contact) == expected
+
+
+def test_classify_contact_records_auditable_reason():
+    contact = make_contact("recruiter@example.com", "Recruiter")
+
+    qualification, reason = classify_contact(contact)
+    annotated_contact = annotate_contact(contact)
+
+    assert qualification == ContactQualification.eligible
+    assert reason == "eligible_role:recruit"
+    assert annotated_contact.qualification == qualification
+    assert annotated_contact.qualification_reason == reason
 
 
 def test_rank_and_select_best_eligible_contact():

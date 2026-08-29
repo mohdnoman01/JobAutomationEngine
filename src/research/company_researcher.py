@@ -13,7 +13,12 @@ def research_company(company: Company) -> ResearchResult:
 
     html = fetch_page(company.website)
     text = extract_text(html)
-    contacts = discover_contacts(html, company, source=company.website)
+    contacts = discover_contacts(
+        html,
+        company,
+        source=company.website,
+        discovery_type="homepage",
+    )
 
     for page_url in discover_relevant_pages(html, company.website):
         try:
@@ -22,7 +27,14 @@ def research_company(company: Company) -> ResearchResult:
             print(f"[research] {company.name}: skipped {page_url} - {exc}")
             continue
 
-        contacts.extend(discover_contacts(page_html, company, source=page_url))
+        contacts.extend(
+            discover_contacts(
+                page_html,
+                company,
+                source=page_url,
+                discovery_type="same_domain_page",
+            )
+        )
 
     return ResearchResult(
         company_name=company.name,
