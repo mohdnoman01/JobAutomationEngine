@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from src.applications.tracker import load_contacts
 from src.email.drafts import load_drafts
@@ -18,11 +17,6 @@ def test_pipeline_creates_application_and_email_draft(
         encoding="utf-8",
     )
 
-    company = Company(
-        name="Test Startup",
-        website="https://example.com",
-        careers_url="https://example.com/careers",
-    )
 
     contact = Contact(
         name="Test Recruiter",
@@ -86,12 +80,6 @@ def test_pipeline_does_not_duplicate_existing_records(
         "Test Startup,https://example.com,"
         "https://example.com/careers\n",
         encoding="utf-8",
-    )
-
-    company = Company(
-        name="Test Startup",
-        website="https://example.com",
-        careers_url="https://example.com/careers",
     )
 
     contact = Contact(

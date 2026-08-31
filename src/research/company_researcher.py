@@ -1,14 +1,13 @@
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from src.research.contact_discovery import (
     deduplicate_contacts,
     discover_contacts,
     discover_relevant_pages,
 )
-from src.research.scraper import PageFetcher, extract_text, fetch_page
 from src.research.models import Company, ResearchResult
-
+from src.research.scraper import PageFetcher, extract_text, fetch_page
 
 MAX_CONTACT_PAGE_WORKERS = 2
 
@@ -27,7 +26,7 @@ def _fetch_contact_pages(
         for page_url, future in zip(page_urls, futures):
             try:
                 results.append((page_url, future.result()))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 results.append((page_url, exc))
 
         return results

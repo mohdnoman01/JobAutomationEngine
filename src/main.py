@@ -8,7 +8,6 @@ from pathlib import Path
 from src.orchestrator import run_pipeline
 from src.research.scraper import HttpPerformanceMetrics
 
-
 DEFAULT_APPLICATIONS_PATH = Path("data/output/applications.json")
 DEFAULT_CONTACTS_PATH = Path("data/output/contacts.json")
 DEFAULT_DRAFTS_PATH = Path("data/output/email_drafts.json")
@@ -86,7 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.companies,
             **pipeline_arguments,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"Pipeline failed: {exc}", file=sys.stderr)
         return 1
 
