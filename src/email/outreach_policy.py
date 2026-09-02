@@ -134,17 +134,32 @@ def select_best_contact(contacts: list[Contact]) -> Contact | None:
 
 
 def _job_relevance_score(job: Job) -> int:
-    content = f"{job.title} {job.description or ''}".casefold()
+    title = job.title.casefold()
+    description = (job.description or "").casefold()
 
-    if "android" in content:
-        return 4
-    if "kotlin" in content:
-        return 3
-    if "mobile" in content:
-        return 2
-    if "software engineer" in content or "software developer" in content:
-        return 1
-    return 0
+    score = 0
+
+    if "android" in title:
+        score += 10
+    if "kotlin" in title:
+        score += 8
+    if "jetpack compose" in title:
+        score += 8
+    if "mobile" in title:
+        score += 6
+    if "software engineer" in title or "software developer" in title:
+        score += 3
+
+    if "android" in description:
+        score += 4
+    if "kotlin" in description:
+        score += 3
+    if "jetpack compose" in description:
+        score += 3
+    if "mobile" in description:
+        score += 2
+
+    return score
 
 
 def select_relevant_job(jobs: list[Job]) -> Job | None:

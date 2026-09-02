@@ -21,8 +21,14 @@ def make_contact(email: str, role: str | None = None) -> Contact:
     [
         (make_contact("recruiter@example.com"), ContactQualification.eligible),
         (make_contact("talent@example.com"), ContactQualification.eligible),
-        (make_contact("people@example.com", "Human Resources"), ContactQualification.eligible),
-        (make_contact("jobs@example.com", "Hiring Manager"), ContactQualification.eligible),
+        (
+            make_contact("people@example.com", "Human Resources"),
+            ContactQualification.eligible,
+        ),
+        (
+            make_contact("jobs@example.com", "Hiring Manager"),
+            ContactQualification.eligible,
+        ),
         (make_contact("jane.doe@example.com"), ContactQualification.uncertain),
         (make_contact("sales@example.com"), ContactQualification.rejected),
         (make_contact("press@example.com"), ContactQualification.rejected),
@@ -76,10 +82,94 @@ def test_select_best_contact_returns_none_without_eligible_contact():
 
 def test_select_relevant_job_prefers_android_then_keeps_input_order():
     jobs = [
-        Job(title="Backend Engineer", company="Test Startup", url="https://example.com/backend"),
-        Job(title="Android Engineer", company="Test Startup", url="https://example.com/android"),
-        Job(title="Kotlin Engineer", company="Test Startup", url="https://example.com/kotlin"),
+        Job(
+            title="Backend Engineer",
+            company="Test Startup",
+            url="https://example.com/backend",
+        ),
+        Job(
+            title="Android Engineer",
+            company="Test Startup",
+            url="https://example.com/android",
+        ),
+        Job(
+            title="Kotlin Engineer",
+            company="Test Startup",
+            url="https://example.com/kotlin",
+        ),
     ]
 
     assert select_relevant_job(jobs) == jobs[1]
     assert select_relevant_job([]) is None
+
+
+def test_select_relevant_job_prefers_android_title():
+    jobs = [
+        Job(
+            title="Software Engineer",
+            company="Test Startup",
+            url="https://example.com/software",
+            description="Works with Android teams.",
+        ),
+        Job(
+            title="Android Developer",
+            company="Test Startup",
+            url="https://example.com/android",
+        ),
+    ]
+
+    assert select_relevant_job(jobs) == jobs[1]
+
+
+def test_select_relevant_job_prefers_kotlin_over_generic_mobile():
+    jobs = [
+        Job(
+            title="Mobile Developer",
+            company="Test Startup",
+            url="https://example.com/mobile",
+        ),
+        Job(
+            title="Kotlin Developer",
+            company="Test Startup",
+            url="https://example.com/kotlin",
+        ),
+    ]
+
+    assert select_relevant_job(jobs) == jobs[1]
+
+
+def test_select_relevant_job_prefers_jetpack_compose():
+    jobs = [
+        Job(
+            title="Mobile Developer",
+            company="Test Startup",
+            url="https://example.com/mobile",
+        ),
+        Job(
+            title="Android Developer",
+            company="Test Startup",
+            url="https://example.com/compose",
+            description="Build Android apps with Jetpack Compose.",
+        ),
+    ]
+
+    assert select_relevant_job(jobs) == jobs[1]
+
+
+def test_select_relevant_job_prefers_android_development_over_generic_mobile():
+    jobs = [
+        Job(
+            title="Mobile QA Engineer",
+            company="Test Startup",
+            url="https://example.com/mobile-qa",
+            description="Testing Android and mobile applications.",
+        ),
+        Job(
+            title="Android Developer",
+            company="Test Startup",
+            url="https://example.com/android-dev",
+            description="Build Android applications using Kotlin.",
+        ),
+    ]
+
+    assert select_relevant_job(jobs) == jobs[1]
