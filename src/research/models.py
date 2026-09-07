@@ -21,6 +21,13 @@ class Job(BaseModel):
     employment_type: str | None = None
 
 
+class UserProfile(BaseModel):
+    target_roles: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
+    preferred_locations: list[str] = Field(default_factory=list)
+    employment_types: list[str] = Field(default_factory=list)
+
+
 class ContactQualification(StrEnum):
     eligible = "eligible"
     uncertain = "uncertain"

@@ -18,6 +18,7 @@ from src.research.company_loader import load_companies
 from src.research.company_researcher import research_company
 from src.research.job_discovery import discover_jobs
 from src.research.scraper import HttpPerformanceMetrics, PageFetcher
+from src.research.models import UserProfile
 
 DUPLICATE_DRAFT_ERROR = "An email draft already exists for this recipient and job."
 
@@ -25,11 +26,14 @@ DUPLICATE_DRAFT_ERROR = "An email draft already exists for this recipient and jo
 def run_pipeline(
     companies_path: str | Path,
     *,
+    profile: UserProfile | None = None,
     applications_path: str | Path = "data/output/applications.json",
     contacts_path: str | Path = "data/output/contacts.json",
     drafts_path: str | Path = "data/output/email_drafts.json",
     http_metrics: HttpPerformanceMetrics | None = None,
 ) -> dict[str, int]:
+    profile = profile or UserProfile()
+
     companies = load_companies(str(companies_path))
 
     application_tracker = ApplicationTracker(applications_path)
@@ -105,7 +109,7 @@ def run_pipeline(
                 applications_created += 1
 
         contact = select_best_contact(research.contacts)
-        job = select_relevant_job(jobs)
+        job = select_relevant_job(jobs, profile)
 
         if contact is not None and job is not None:
             email = create_outreach_email(

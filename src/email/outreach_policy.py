@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 
 from src.research.contact_discovery import ASSET_FILE_EXTENSIONS
-from src.research.models import Contact, ContactQualification, Job
+
+from src.research.models import Contact, ContactQualification, Job, UserProfile
 
 
 ELIGIBLE_TERMS = ("recruit", "talent", "human resources", "hr", "hiring")
@@ -133,40 +134,38 @@ def select_best_contact(contacts: list[Contact]) -> Contact | None:
     return ranked_contacts[0] if ranked_contacts else None
 
 
-def _job_relevance_score(job: Job) -> int:
+def _job_relevance_score(job: Job, profile: UserProfile) -> int:
     title = job.title.casefold()
     description = (job.description or "").casefold()
 
     score = 0
 
-    if "android" in title:
-        score += 10
-    if "kotlin" in title:
-        score += 8
-    if "jetpack compose" in title:
-        score += 8
-    if "mobile" in title:
-        score += 6
-    if "software engineer" in title or "software developer" in title:
-        score += 3
+    for role in profile.target_roles:
+        role = role.casefold().strip()
 
-    if "android" in description:
-        score += 4
-    if "kotlin" in description:
-        score += 3
-    if "jetpack compose" in description:
-        score += 3
-    if "mobile" in description:
-        score += 2
+        if role and role in title:
+            score += 10
+
+    for skill in profile.preferred_skills:
+        skill = skill.casefold().strip()
+
+        if skill and skill in title:
+            score += 8
+
+        if skill and skill in description:
+            score += 3
 
     return score
 
 
-def select_relevant_job(jobs: list[Job]) -> Job | None:
+def select_relevant_job(
+    jobs: list[Job],
+    profile: UserProfile,
+) -> Job | None:
     if not jobs:
         return None
 
     return max(
         enumerate(jobs),
-        key=lambda item: (_job_relevance_score(item[1]), -item[0]),
+        key=lambda item: (_job_relevance_score(item[1], profile), -item[0]),
     )[1]

@@ -9,7 +9,7 @@ from src.email.outreach_policy import (
     select_best_contact,
     select_relevant_job,
 )
-from src.research.models import Contact, Job
+from src.research.models import Contact, Job, UserProfile
 
 
 def make_contact(email: str, role: str | None = None) -> Contact:
@@ -99,8 +99,12 @@ def test_select_relevant_job_prefers_android_then_keeps_input_order():
         ),
     ]
 
-    assert select_relevant_job(jobs) == jobs[1]
-    assert select_relevant_job([]) is None
+    profile = UserProfile(
+        target_roles=["Android Engineer"],
+        preferred_skills=["Kotlin", "Jetpack Compose"],
+    )
+    assert select_relevant_job(jobs, profile) == jobs[1]
+    assert select_relevant_job([], profile) is None
 
 
 def test_select_relevant_job_prefers_android_title():
@@ -118,7 +122,11 @@ def test_select_relevant_job_prefers_android_title():
         ),
     ]
 
-    assert select_relevant_job(jobs) == jobs[1]
+    profile = UserProfile(
+        target_roles=["Android Developer"],
+        preferred_skills=["Kotlin", "Jetpack Compose"],
+    )
+    assert select_relevant_job(jobs, profile) == jobs[1]
 
 
 def test_select_relevant_job_prefers_kotlin_over_generic_mobile():
@@ -135,7 +143,11 @@ def test_select_relevant_job_prefers_kotlin_over_generic_mobile():
         ),
     ]
 
-    assert select_relevant_job(jobs) == jobs[1]
+    profile = UserProfile(
+        target_roles=["Android Engineer"],
+        preferred_skills=["Kotlin", "Jetpack Compose"],
+    )
+    assert select_relevant_job(jobs, profile) == jobs[1]
 
 
 def test_select_relevant_job_prefers_jetpack_compose():
@@ -153,7 +165,11 @@ def test_select_relevant_job_prefers_jetpack_compose():
         ),
     ]
 
-    assert select_relevant_job(jobs) == jobs[1]
+    profile = UserProfile(
+        target_roles=["Android Engineer"],
+        preferred_skills=["Kotlin", "Jetpack Compose"],
+    )
+    assert select_relevant_job(jobs, profile) == jobs[1]
 
 
 def test_select_relevant_job_prefers_android_development_over_generic_mobile():
@@ -172,4 +188,30 @@ def test_select_relevant_job_prefers_android_development_over_generic_mobile():
         ),
     ]
 
-    assert select_relevant_job(jobs) == jobs[1]
+    profile = UserProfile(
+        target_roles=["Android Engineer"],
+        preferred_skills=["Kotlin", "Jetpack Compose"],
+    )
+    assert select_relevant_job(jobs, profile) == jobs[1]
+
+
+def test_select_relevant_job_uses_profile_preferences():
+    jobs = [
+        Job(
+            title="Android Developer",
+            company="Company A",
+            url="https://example.com/a",
+        ),
+        Job(
+            title="Python Backend Developer",
+            company="Company B",
+            url="https://example.com/b",
+        ),
+    ]
+
+    profile = UserProfile(
+        target_roles=["Backend Developer"],
+        preferred_skills=["Python"],
+    )
+
+    assert select_relevant_job(jobs, profile) == jobs[1]

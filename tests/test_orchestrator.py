@@ -1,8 +1,7 @@
-
 from src.applications.tracker import load_contacts
 from src.email.drafts import load_drafts
 from src.orchestrator import run_pipeline
-from src.research.models import Company, Contact, Job, ResearchResult
+from src.research.models import Company, Contact, Job, ResearchResult, UserProfile
 
 
 def test_pipeline_creates_application_and_email_draft(
@@ -16,7 +15,6 @@ def test_pipeline_creates_application_and_email_draft(
         "https://example.com/careers\n",
         encoding="utf-8",
     )
-
 
     contact = Contact(
         name="Test Recruiter",
@@ -197,16 +195,23 @@ def test_pipeline_creates_one_draft_for_the_best_contact_and_job(
         applications_path=applications_path,
         contacts_path=contacts_path,
         drafts_path=drafts_path,
+        profile=UserProfile(
+            target_roles=["Android Engineer"],
+            preferred_skills=["Kotlin"],
+        ),
     )
     second = run_pipeline(
         companies_file,
         applications_path=applications_path,
         contacts_path=contacts_path,
         drafts_path=drafts_path,
+        profile=UserProfile(
+            target_roles=["Android Engineer"],
+            preferred_skills=["Kotlin"],
+     ),
     )
 
     drafts = load_drafts(drafts_path)
-
     assert first["applications_created"] == 3
     assert first["drafts_created"] == 1
     assert second["applications_created"] == 0
@@ -263,6 +268,12 @@ def test_pipeline_creates_no_draft_without_an_eligible_contact(tmp_path, monkeyp
         contacts_path=contacts_path,
         drafts_path=drafts_path,
     )
+
+    assert result["drafts_created"] == 0
+    assert not drafts_path.exists()
+    assert {contact.email for contact in load_contacts(contacts_path)} == {
+        contact.email for contact in contacts
+    }
 
     assert result["drafts_created"] == 0
     assert not drafts_path.exists()
