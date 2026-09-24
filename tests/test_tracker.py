@@ -99,6 +99,11 @@ def test_application_tracker_updates_status(tmp_path):
         job_url="https://example.com/android",
     )
 
+    tracker.update_status(
+        "https://example.com/android",
+        ApplicationStatus.ready,
+    )
+
     updated = tracker.update_status(
         "https://example.com/android",
         ApplicationStatus.applied,
@@ -107,6 +112,141 @@ def test_application_tracker_updates_status(tmp_path):
 
     assert updated.status == ApplicationStatus.applied
     assert updated.applied_date == date(2026, 8, 24)
+
+
+def _application_at_status(application, status):
+    paths = {
+        ApplicationStatus.discovered: [],
+        ApplicationStatus.ready: [ApplicationStatus.ready],
+        ApplicationStatus.applied: [
+            ApplicationStatus.ready,
+            ApplicationStatus.applied,
+        ],
+        ApplicationStatus.interview: [
+            ApplicationStatus.ready,
+            ApplicationStatus.applied,
+            ApplicationStatus.interview,
+        ],
+        ApplicationStatus.rejected: [ApplicationStatus.rejected],
+        ApplicationStatus.withdrawn: [
+            ApplicationStatus.ready,
+            ApplicationStatus.withdrawn,
+        ],
+        ApplicationStatus.offer: [
+            ApplicationStatus.ready,
+            ApplicationStatus.applied,
+            ApplicationStatus.interview,
+            ApplicationStatus.offer,
+        ],
+    }
+
+    for next_status in paths[status]:
+        application.transition_to(next_status)
+
+    return application
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "next_status"),
+    [
+        (ApplicationStatus.discovered, ApplicationStatus.ready),
+        (ApplicationStatus.ready, ApplicationStatus.applied),
+        (ApplicationStatus.applied, ApplicationStatus.interview),
+        (ApplicationStatus.interview, ApplicationStatus.offer),
+        (ApplicationStatus.discovered, ApplicationStatus.rejected),
+        (ApplicationStatus.ready, ApplicationStatus.rejected),
+        (ApplicationStatus.ready, ApplicationStatus.withdrawn),
+        (ApplicationStatus.applied, ApplicationStatus.rejected),
+        (ApplicationStatus.applied, ApplicationStatus.withdrawn),
+        (ApplicationStatus.interview, ApplicationStatus.rejected),
+        (ApplicationStatus.interview, ApplicationStatus.withdrawn),
+    ],
+)
+def test_application_tracker_allows_valid_transitions(
+    tmp_path,
+    initial_status,
+    next_status,
+):
+    path = tmp_path / "applications.json"
+    tracker = ApplicationTracker(path)
+    application = tracker.create(
+        company="Test Startup",
+        job_title="Android Developer",
+        job_url="https://example.com/android",
+    )
+    _application_at_status(application, initial_status)
+    save_applications([application], path)
+
+    updated = tracker.update_status(
+        "https://example.com/android",
+        next_status,
+    )
+
+    assert updated.status == next_status
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "next_status"),
+    [
+        (ApplicationStatus.discovered, ApplicationStatus.applied),
+        (ApplicationStatus.ready, ApplicationStatus.interview),
+        (ApplicationStatus.applied, ApplicationStatus.offer),
+        (ApplicationStatus.offer, ApplicationStatus.rejected),
+        (ApplicationStatus.rejected, ApplicationStatus.ready),
+        (ApplicationStatus.withdrawn, ApplicationStatus.applied),
+    ],
+)
+def test_application_tracker_rejects_invalid_transitions(
+    tmp_path,
+    initial_status,
+    next_status,
+):
+    path = tmp_path / "applications.json"
+    tracker = ApplicationTracker(path)
+    application = tracker.create(
+        company="Test Startup",
+        job_title="Android Developer",
+        job_url="https://example.com/android",
+    )
+    _application_at_status(application, initial_status)
+    save_applications([application], path)
+
+    with pytest.raises(ValueError, match="Invalid application status transition"):
+        tracker.update_status(
+            "https://example.com/android",
+            next_status,
+        )
+
+    assert tracker.get("https://example.com/android").status == initial_status
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        ApplicationStatus.offer,
+        ApplicationStatus.rejected,
+        ApplicationStatus.withdrawn,
+    ],
+)
+def test_application_tracker_terminal_states_reject_updates(
+    tmp_path,
+    terminal_status,
+):
+    path = tmp_path / "applications.json"
+    tracker = ApplicationTracker(path)
+    application = tracker.create(
+        company="Test Startup",
+        job_title="Android Developer",
+        job_url="https://example.com/android",
+    )
+    _application_at_status(application, terminal_status)
+    save_applications([application], path)
+
+    with pytest.raises(ValueError, match="Invalid application status transition"):
+        tracker.update_status(
+            "https://example.com/android",
+            ApplicationStatus.ready,
+        )
 
 
 def test_application_tracker_rejects_duplicate_job(tmp_path):

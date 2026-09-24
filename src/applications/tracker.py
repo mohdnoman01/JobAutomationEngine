@@ -139,7 +139,7 @@ class ApplicationTracker:
             if application.job_url != job_url:
                 continue
 
-            application.status = status
+            application.transition_to(status)
 
             if applied_date is not None:
                 application.applied_date = applied_date
