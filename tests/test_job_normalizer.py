@@ -1,4 +1,4 @@
-from src.research.job_normalizer import normalize_job
+from src.research.job_normalizer import normalize_job, normalize_job_url
 from src.research.models import Job
 
 
@@ -53,3 +53,12 @@ def test_normalize_job_does_not_mutate_original():
 
     assert normalized.title == "Android Developer"
     assert normalized.url == "https://example.com/jobs/123"
+
+
+def test_normalize_job_url_removes_fragments_but_preserves_query_parameters():
+    assert (
+        normalize_job_url(
+            " https://example.com/jobs/123?utm_source=careers#apply "
+        )
+        == "https://example.com/jobs/123?utm_source=careers"
+    )

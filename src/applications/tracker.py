@@ -10,6 +10,7 @@ from src.research.models import Contact
 from datetime import date
 
 from src.applications.models import Application, ApplicationStatus
+from src.research.job_normalizer import normalize_job_url
 
 
 def save_applications(
@@ -79,8 +80,10 @@ class ApplicationTracker:
         return load_applications(self.path)
 
     def get(self, job_url: str) -> Application | None:
+        normalized_job_url = normalize_job_url(job_url)
+
         for application in self.list():
-            if application.job_url == job_url:
+            if normalize_job_url(application.job_url) == normalized_job_url:
                 return application
 
         return None
@@ -96,25 +99,26 @@ class ApplicationTracker:
         notes: str | None = None,
     ) -> Application:
         applications = self.list()
+        normalized_job_url = normalize_job_url(job_url)
 
         existing = next(
             (
                 application
                 for application in applications
-                if application.job_url == job_url
+                if normalize_job_url(application.job_url) == normalized_job_url
             ),
             None,
         )
 
         if existing is not None:
             raise ValueError(
-                f"Application already exists for job URL: {job_url}"
+                f"Application already exists for job URL: {normalized_job_url}"
             )
 
         application = Application(
             company=company,
             job_title=job_title,
-            job_url=job_url,
+            job_url=normalized_job_url,
             status=ApplicationStatus.discovered,
             contact_name=contact_name,
             contact_email=contact_email,
@@ -134,9 +138,10 @@ class ApplicationTracker:
         applied_date: date | None = None,
     ) -> Application:
         applications = self.list()
+        normalized_job_url = normalize_job_url(job_url)
 
         for application in applications:
-            if application.job_url != job_url:
+            if normalize_job_url(application.job_url) != normalized_job_url:
                 continue
 
             application.transition_to(status)

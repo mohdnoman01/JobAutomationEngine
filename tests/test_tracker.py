@@ -257,7 +257,7 @@ def test_application_tracker_rejects_duplicate_job(tmp_path):
     tracker.create(
         company="Test Startup",
         job_title="Android Developer",
-        job_url="https://example.com/android",
+        job_url="https://example.com/android#apply",
     )
 
     with pytest.raises(ValueError):
@@ -266,6 +266,28 @@ def test_application_tracker_rejects_duplicate_job(tmp_path):
             job_title="Android Developer",
             job_url="https://example.com/android",
         )
+
+
+def test_application_tracker_normalizes_legacy_url_on_lookup(tmp_path):
+    path = tmp_path / "applications.json"
+
+    save_applications(
+        [
+            Application(
+                company="Test Startup",
+                job_title="Android Developer",
+                job_url="https://example.com/android#apply",
+            )
+        ],
+        path,
+    )
+
+    tracker = ApplicationTracker(path)
+
+    application = tracker.get("https://example.com/android")
+
+    assert application is not None
+    assert application.job_url == "https://example.com/android#apply"
 
 
 def test_application_tracker_raises_for_missing_job(tmp_path):

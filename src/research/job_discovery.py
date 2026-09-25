@@ -13,6 +13,22 @@ from src.research.scraper import PageFetcher, fetch_page
 from src.research.job_normalizer import normalize_job
 
 
+def _normalize_and_deduplicate_jobs(jobs: list[Job]) -> list[Job]:
+    normalized_jobs: list[Job] = []
+    seen_urls: set[str] = set()
+
+    for job in jobs:
+        normalized_job = normalize_job(job)
+
+        if normalized_job.url in seen_urls:
+            continue
+
+        seen_urls.add(normalized_job.url)
+        normalized_jobs.append(normalized_job)
+
+    return normalized_jobs
+
+
 def discover_jobs(
     company: Company,
     page_fetcher: PageFetcher | None = None,
@@ -33,7 +49,7 @@ def discover_jobs(
             company,
             company.careers_url,
         )
-        return [normalize_job(job) for job in jobs]
+        return _normalize_and_deduplicate_jobs(jobs)
 
     if ats == "lever":
         jobs = LeverParser().parse_jobs(
@@ -41,7 +57,7 @@ def discover_jobs(
             company,
             company.careers_url,
         )
-        return [normalize_job(job) for job in jobs]
+        return _normalize_and_deduplicate_jobs(jobs)
 
     if ats == "ashby":
         jobs = AshbyParser().parse_jobs(
@@ -49,7 +65,7 @@ def discover_jobs(
             company,
             company.careers_url,
         )
-        return [normalize_job(job) for job in jobs]
+        return _normalize_and_deduplicate_jobs(jobs)
 
     print(f"[research] {company.name}: using generic job parser")
 
@@ -58,4 +74,4 @@ def discover_jobs(
         company,
         company.careers_url,
     )
-    return [normalize_job(job) for job in jobs]
+    return _normalize_and_deduplicate_jobs(jobs)
