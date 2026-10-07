@@ -1,4 +1,7 @@
-from src.applications.tracker import load_contacts
+from src.applications.tracker import ApplicationTracker, load_contacts
+from src.applications.profile import ApplicationProfile
+from src.applications.recovery import AttemptStore
+from src.applications.submission import ApplicationEngine
 from src.email.drafts import load_drafts
 from src.orchestrator import run_pipeline
 from src.research.models import Company, Contact, Job, ResearchResult, UserProfile
@@ -66,6 +69,50 @@ def test_pipeline_creates_application_and_email_draft(
     assert applications_path.exists()
     assert contacts_path.exists()
     assert drafts_path.exists()
+
+
+def test_pipeline_can_opt_into_application_preparation(tmp_path, monkeypatch):
+    companies_file = tmp_path / "companies.csv"
+    companies_file.write_text(
+        "name,website,careers_url\n"
+        "Test Startup,https://example.com,https://example.com/careers\n",
+        encoding="utf-8",
+    )
+    job = Job(
+        title="Android Developer",
+        company="Test Startup",
+        url="https://example.com/jobs/android",
+        source="unsupported_test_platform",
+    )
+    monkeypatch.setattr(
+        "src.orchestrator.research_company",
+        lambda _, **__: ResearchResult(
+            company_name="Test Startup",
+            url="https://example.com",
+            text="Test company",
+        ),
+    )
+    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _, **__: [job])
+
+    applications_path = tmp_path / "applications.json"
+    attempts_path = tmp_path / "attempts.json"
+    application_engine = ApplicationEngine(
+        ApplicationTracker(applications_path),
+        AttemptStore(attempts_path),
+    )
+
+    result = run_pipeline(
+        companies_file,
+        applications_path=applications_path,
+        contacts_path=tmp_path / "contacts.json",
+        drafts_path=tmp_path / "drafts.json",
+        application_profile=ApplicationProfile(name="Test Person"),
+        application_engine=application_engine,
+        profile=UserProfile(target_roles=["Android Developer"]),
+    )
+
+    assert result["applications_created"] == 1
+    assert AttemptStore(attempts_path).list()[0].outcome.value == "unsupported"
 
 
 def test_pipeline_does_not_duplicate_existing_records(

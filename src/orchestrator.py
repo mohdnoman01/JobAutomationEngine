@@ -7,9 +7,12 @@ from src.applications.tracker import (
     load_contacts,
     save_contacts,
 )
+from src.applications.profile import ApplicationProfile
+from src.applications.submission import ApplicationEngine
 from src.email.manager import EmailDraftManager
 from src.email.outreach_policy import (
     annotate_contact,
+    is_relevant_job,
     select_best_contact,
     select_relevant_job,
 )
@@ -30,6 +33,8 @@ def run_pipeline(
     applications_path: str | Path = "data/output/applications.json",
     contacts_path: str | Path = "data/output/contacts.json",
     drafts_path: str | Path = "data/output/email_drafts.json",
+    application_profile: ApplicationProfile | None = None,
+    application_engine: ApplicationEngine | None = None,
     http_metrics: HttpPerformanceMetrics | None = None,
 ) -> dict[str, int]:
     profile = profile or UserProfile()
@@ -110,6 +115,20 @@ def run_pipeline(
 
         contact = select_best_contact(research.contacts)
         job = select_relevant_job(jobs, profile)
+
+        if (
+            application_engine is not None
+            and application_profile is not None
+            and job is not None
+            and is_relevant_job(job, profile)
+        ):
+            application = application_tracker.get(job.url)
+            if application is not None:
+                application_engine.process(
+                    application,
+                    job,
+                    application_profile,
+                )
 
         if contact is not None and job is not None:
             email = create_outreach_email(

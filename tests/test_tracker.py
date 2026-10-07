@@ -2,7 +2,11 @@ from datetime import date
 
 import pytest
 
-from src.applications.models import Application, ApplicationStatus
+from src.applications.models import (
+    Application,
+    ApplicationStatus,
+    AutomationStatus,
+)
 from src.applications.tracker import (
     ApplicationTracker,
     load_applications,
@@ -104,10 +108,23 @@ def test_application_tracker_updates_status(tmp_path):
         ApplicationStatus.ready,
     )
 
-    updated = tracker.update_status(
+    tracker.update_automation_status(
         "https://example.com/android",
-        ApplicationStatus.applied,
+        AutomationStatus.preparing,
+    )
+    tracker.update_automation_status(
+        "https://example.com/android",
+        AutomationStatus.ready_to_submit,
+    )
+    tracker.update_automation_status(
+        "https://example.com/android",
+        AutomationStatus.submitting,
+    )
+
+    updated = tracker.mark_submitted(
+        "https://example.com/android",
         applied_date=date(2026, 8, 24),
+        submission_evidence="Recorded submission confirmation",
     )
 
     assert updated.status == ApplicationStatus.applied
@@ -141,7 +158,13 @@ def _application_at_status(application, status):
     }
 
     for next_status in paths[status]:
-        application.transition_to(next_status)
+        if next_status == ApplicationStatus.applied:
+            application.transition_to(
+                next_status,
+                submission_evidence="Test submission confirmation",
+            )
+        else:
+            application.transition_to(next_status)
 
     return application
 
@@ -177,10 +200,28 @@ def test_application_tracker_allows_valid_transitions(
     _application_at_status(application, initial_status)
     save_applications([application], path)
 
-    updated = tracker.update_status(
-        "https://example.com/android",
-        next_status,
-    )
+    if next_status == ApplicationStatus.applied:
+        tracker.update_automation_status(
+            "https://example.com/android",
+            AutomationStatus.preparing,
+        )
+        tracker.update_automation_status(
+            "https://example.com/android",
+            AutomationStatus.ready_to_submit,
+        )
+        tracker.update_automation_status(
+            "https://example.com/android",
+            AutomationStatus.submitting,
+        )
+        updated = tracker.mark_submitted(
+            "https://example.com/android",
+            submission_evidence="Test submission confirmation",
+        )
+    else:
+        updated = tracker.update_status(
+            "https://example.com/android",
+            next_status,
+        )
 
     assert updated.status == next_status
 
@@ -211,7 +252,7 @@ def test_application_tracker_rejects_invalid_transitions(
     _application_at_status(application, initial_status)
     save_applications([application], path)
 
-    with pytest.raises(ValueError, match="Invalid application status transition"):
+    with pytest.raises(ValueError):
         tracker.update_status(
             "https://example.com/android",
             next_status,
@@ -265,6 +306,26 @@ def test_application_tracker_rejects_duplicate_job(tmp_path):
             company="Test Startup",
             job_title="Android Developer",
             job_url="https://example.com/android",
+        )
+
+
+def test_application_tracker_requires_evidence_to_mark_applied(tmp_path):
+    path = tmp_path / "applications.json"
+    tracker = ApplicationTracker(path)
+    tracker.create(
+        company="Test Startup",
+        job_title="Android Developer",
+        job_url="https://example.com/android",
+    )
+    tracker.update_status(
+        "https://example.com/android",
+        ApplicationStatus.ready,
+    )
+
+    with pytest.raises(ValueError, match="Use mark_submitted"):
+        tracker.update_status(
+            "https://example.com/android",
+            ApplicationStatus.applied,
         )
 
 

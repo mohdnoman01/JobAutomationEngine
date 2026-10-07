@@ -158,6 +158,10 @@ def _job_relevance_score(job: Job, profile: UserProfile) -> int:
     return score
 
 
+def is_relevant_job(job: Job, profile: UserProfile) -> bool:
+    return _job_relevance_score(job, profile) > 0
+
+
 def select_relevant_job(
     jobs: list[Job],
     profile: UserProfile,

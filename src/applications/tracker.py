@@ -9,7 +9,11 @@ from src.research.models import Contact
 
 from datetime import date
 
-from src.applications.models import Application, ApplicationStatus
+from src.applications.models import (
+    Application,
+    ApplicationStatus,
+    AutomationStatus,
+)
 from src.research.job_normalizer import normalize_job_url
 
 
@@ -137,6 +141,11 @@ class ApplicationTracker:
         *,
         applied_date: date | None = None,
     ) -> Application:
+        if status == ApplicationStatus.applied:
+            raise ValueError(
+                "Use mark_submitted after submission has been verified"
+            )
+
         applications = self.list()
         normalized_job_url = normalize_job_url(job_url)
 
@@ -156,3 +165,107 @@ class ApplicationTracker:
         raise ValueError(
             f"Application not found for job URL: {job_url}"
         )
+
+    def update_automation_status(
+        self,
+        job_url: str,
+        status: AutomationStatus,
+    ) -> Application:
+        normalized_job_url = normalize_job_url(job_url)
+        applications = self.list()
+
+        for application in applications:
+            if normalize_job_url(application.job_url) != normalized_job_url:
+                continue
+
+            application.transition_automation_to(status)
+            save_applications(applications, self.path)
+            return application
+
+        raise ValueError(f"Application not found for job URL: {job_url}")
+
+    def mark_submitted(
+        self,
+        job_url: str,
+        *,
+        submission_evidence: str,
+        applied_date: date | None = None,
+    ) -> Application:
+        if not submission_evidence.strip():
+            raise ValueError("Submission evidence must not be empty")
+
+        normalized_job_url = normalize_job_url(job_url)
+        applications = self.list()
+
+        for application in applications:
+            if normalize_job_url(application.job_url) != normalized_job_url:
+                continue
+            if application.automation_status != AutomationStatus.submitting:
+                raise ValueError(
+                    "Application must be submitting before recording success"
+                )
+
+            if application.status == ApplicationStatus.discovered:
+                application.transition_to(ApplicationStatus.ready)
+            if application.status == ApplicationStatus.ready:
+                application.transition_to(
+                    ApplicationStatus.applied,
+                    submission_evidence=submission_evidence,
+                )
+            elif application.status != ApplicationStatus.applied:
+                raise ValueError(
+                    f"Cannot mark application submitted from status: "
+                    f"{application.status.value}"
+                )
+
+            application.applied_date = applied_date or date.today()
+            application.transition_automation_to(AutomationStatus.submitted)
+            save_applications(applications, self.path)
+            return application
+
+        raise ValueError(f"Application not found for job URL: {job_url}")
+
+    def resolve_unknown_submission(
+        self,
+        job_url: str,
+        *,
+        submitted: bool,
+        evidence: str,
+    ) -> Application:
+        if not evidence.strip():
+            raise ValueError("Reconciliation evidence must not be empty")
+
+        normalized_job_url = normalize_job_url(job_url)
+        applications = self.list()
+
+        for application in applications:
+            if normalize_job_url(application.job_url) != normalized_job_url:
+                continue
+            if (
+                application.automation_status
+                != AutomationStatus.unknown_submission_result
+            ):
+                raise ValueError("Application does not have an unknown submission result")
+
+            if submitted:
+                if application.status == ApplicationStatus.discovered:
+                    application.transition_to(ApplicationStatus.ready)
+                if application.status == ApplicationStatus.ready:
+                    application.transition_to(
+                        ApplicationStatus.applied,
+                        submission_evidence=evidence,
+                    )
+                elif application.status != ApplicationStatus.applied:
+                    raise ValueError(
+                        f"Cannot resolve submission from application status: "
+                        f"{application.status.value}"
+                    )
+                application.applied_date = date.today()
+                application.automation_status = AutomationStatus.submitted
+            else:
+                application.automation_status = AutomationStatus.failed
+
+            save_applications(applications, self.path)
+            return application
+
+        raise ValueError(f"Application not found for job URL: {job_url}")
