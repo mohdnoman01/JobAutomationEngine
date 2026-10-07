@@ -8,6 +8,7 @@ from src.email.outreach_policy import (
     rank_eligible_contacts,
     select_best_contact,
     select_relevant_job,
+    select_relevant_jobs,
 )
 from src.research.models import Contact, Job, UserProfile
 
@@ -215,3 +216,24 @@ def test_select_relevant_job_uses_profile_preferences():
     )
 
     assert select_relevant_job(jobs, profile) == jobs[1]
+
+
+def test_select_relevant_jobs_returns_all_relevant_jobs_in_input_order():
+    jobs = [
+        Job(title="Android Engineer", company="A", url="https://example.com/1"),
+        Job(title="Sales Manager", company="A", url="https://example.com/2"),
+        Job(title="Kotlin Developer", company="A", url="https://example.com/3"),
+        Job(title="Backend Engineer", company="A", url="https://example.com/4"),
+        Job(
+            title="Mobile Engineer",
+            company="A",
+            url="https://example.com/5",
+            description="Kotlin development",
+        ),
+    ]
+    profile = UserProfile(
+        target_roles=["Android Engineer"],
+        preferred_skills=["Kotlin", "Compose"],
+    )
+
+    assert select_relevant_jobs(jobs, profile) == [jobs[0], jobs[2], jobs[4]]

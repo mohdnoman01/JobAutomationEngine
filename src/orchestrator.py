@@ -12,14 +12,15 @@ from src.applications.submission import ApplicationEngine
 from src.email.manager import EmailDraftManager
 from src.email.outreach_policy import (
     annotate_contact,
-    is_relevant_job,
     select_best_contact,
     select_relevant_job,
+    select_relevant_jobs,
 )
 from src.email.templates import create_outreach_email
 from src.research.company_loader import load_companies
 from src.research.company_researcher import research_company
 from src.research.job_discovery import discover_jobs
+from src.research.job_normalizer import normalize_job, normalize_job_url
 from src.research.scraper import HttpPerformanceMetrics, PageFetcher
 from src.research.models import UserProfile
 
@@ -74,6 +75,16 @@ def run_pipeline(
                 company,
                 page_fetcher=page_fetcher,
             )
+            normalized_jobs = []
+            seen_job_urls: set[str] = set()
+            for job in jobs:
+                normalized_job = normalize_job(job)
+                normalized_url = normalize_job_url(normalized_job.url)
+                if normalized_url in seen_job_urls:
+                    continue
+                seen_job_urls.add(normalized_url)
+                normalized_jobs.append(normalized_job)
+            jobs = normalized_jobs
         except Exception as exc:  # noqa: BLE001
             print(f"[pipeline] {company.name}: failed - {exc}")
             continue
@@ -106,7 +117,7 @@ def run_pipeline(
             application = application_tracker.get(job.url)
 
             if application is None:
-                application_tracker.create(
+                application = application_tracker.create(
                     company=company.name,
                     job_title=job.title,
                     job_url=job.url,
@@ -116,19 +127,27 @@ def run_pipeline(
         contact = select_best_contact(research.contacts)
         job = select_relevant_job(jobs, profile)
 
-        if (
-            application_engine is not None
-            and application_profile is not None
-            and job is not None
-            and is_relevant_job(job, profile)
-        ):
-            application = application_tracker.get(job.url)
-            if application is not None:
-                application_engine.process(
-                    application,
-                    job,
-                    application_profile,
-                )
+        if application_engine is not None and application_profile is not None:
+            processed_job_urls: set[str] = set()
+            for relevant_job in select_relevant_jobs(jobs, profile):
+                normalized_url = application_tracker.get(relevant_job.url)
+                if normalized_url is None:
+                    continue
+                job_key = normalized_url.job_url
+                if job_key in processed_job_urls:
+                    continue
+                processed_job_urls.add(job_key)
+                try:
+                    application_engine.process(
+                        normalized_url,
+                        relevant_job,
+                        application_profile,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[pipeline] {company.name} / {relevant_job.title}: "
+                        f"application processing failed - {exc}"
+                    )
 
         if contact is not None and job is not None:
             email = create_outreach_email(

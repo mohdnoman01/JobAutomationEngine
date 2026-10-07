@@ -115,6 +115,105 @@ def test_pipeline_can_opt_into_application_preparation(tmp_path, monkeypatch):
     assert AttemptStore(attempts_path).list()[0].outcome.value == "unsupported"
 
 
+def test_pipeline_processes_all_relevant_jobs_independently(tmp_path, monkeypatch):
+    companies_file = tmp_path / "companies.csv"
+    companies_file.write_text(
+        "name,website,careers_url\n"
+        "Test Startup,https://example.com,https://example.com/careers\n",
+        encoding="utf-8",
+    )
+    jobs = [
+        Job(title="Android Engineer One", company="Test Startup", url="https://example.com/1"),
+        Job(title="Unrelated Sales Role", company="Test Startup", url="https://example.com/2"),
+        Job(title="Android Engineer Two", company="Test Startup", url="https://example.com/3"),
+        Job(title="Android Engineer Three", company="Test Startup", url="https://example.com/4"),
+        Job(title="Android Engineer Four", company="Test Startup", url="https://example.com/5"),
+    ]
+    monkeypatch.setattr(
+        "src.orchestrator.research_company",
+        lambda _, **__: ResearchResult(
+            company_name="Test Startup", url="https://example.com", text="Test"
+        ),
+    )
+    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _, **__: jobs)
+
+    class RecordingEngine:
+        def __init__(self):
+            self.processed = []
+
+        def process(self, application, job, profile):
+            self.processed.append(job.url)
+            if job == jobs[0]:
+                return "success"
+            if job == jobs[2]:
+                raise RuntimeError("isolated failure")
+            if job == jobs[3]:
+                return type("Result", (), {"status": "needs_review"})()
+            if job == jobs[4]:
+                return type("Result", (), {"status": "unsupported"})()
+            return "success"
+
+    engine = RecordingEngine()
+    run_pipeline(
+        companies_file,
+        applications_path=tmp_path / "applications.json",
+        contacts_path=tmp_path / "contacts.json",
+        drafts_path=tmp_path / "drafts.json",
+        application_profile=ApplicationProfile(name="Test Person"),
+        application_engine=engine,
+        profile=UserProfile(target_roles=["Android Engineer"]),
+    )
+
+    assert engine.processed == [jobs[0].url, jobs[2].url, jobs[3].url, jobs[4].url]
+
+
+def test_pipeline_duplicate_job_urls_create_one_record_and_process_once(
+    tmp_path, monkeypatch
+):
+    companies_file = tmp_path / "companies.csv"
+    companies_file.write_text(
+        "name,website,careers_url\n"
+        "Test Startup,https://example.com,https://example.com/careers\n",
+        encoding="utf-8",
+    )
+    job = Job(
+        title="Android Engineer",
+        company="Test Startup",
+        url="https://example.com/jobs/android",
+    )
+    duplicate = job.model_copy(
+        update={"url": "https://example.com/jobs/android#details"}
+    )
+    monkeypatch.setattr(
+        "src.orchestrator.research_company",
+        lambda _, **__: ResearchResult(
+            company_name="Test Startup", url="https://example.com", text="Test"
+        ),
+    )
+    monkeypatch.setattr("src.orchestrator.discover_jobs", lambda _, **__: [job, duplicate])
+
+    class RecordingEngine:
+        def __init__(self):
+            self.processed = []
+
+        def process(self, application, job, profile):
+            self.processed.append(job.url)
+
+    engine = RecordingEngine()
+    result = run_pipeline(
+        companies_file,
+        applications_path=tmp_path / "applications.json",
+        contacts_path=tmp_path / "contacts.json",
+        drafts_path=tmp_path / "drafts.json",
+        application_profile=ApplicationProfile(name="Test Person"),
+        application_engine=engine,
+        profile=UserProfile(target_roles=["Android Engineer"]),
+    )
+
+    assert result["applications_created"] == 1
+    assert engine.processed == [job.url]
+
+
 def test_pipeline_does_not_duplicate_existing_records(
     tmp_path,
     monkeypatch,

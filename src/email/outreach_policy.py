@@ -173,3 +173,11 @@ def select_relevant_job(
         enumerate(jobs),
         key=lambda item: (_job_relevance_score(item[1], profile), -item[0]),
     )[1]
+
+
+def select_relevant_jobs(
+    jobs: list[Job],
+    profile: UserProfile,
+) -> list[Job]:
+    """Return every relevant job in discovery order using the existing score."""
+    return [job for job in jobs if is_relevant_job(job, profile)]
