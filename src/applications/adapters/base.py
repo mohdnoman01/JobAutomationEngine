@@ -43,6 +43,13 @@ class PreparationResult(BaseModel):
     message: str | None = None
 
 
+class SubmissionEvidence(BaseModel):
+    mechanism: str
+    page_url: str | None = None
+    expected_marker: str | None = None
+    observed_marker: str | None = None
+
+
 class AdapterSubmissionResult(BaseModel):
     status: ApplicationResultStatus
     receipt: SubmissionReceipt | None = None
@@ -52,6 +59,7 @@ class AdapterSubmissionResult(BaseModel):
 class AdapterVerificationResult(BaseModel):
     status: ApplicationResultStatus
     verification: SubmissionVerification
+    evidence: SubmissionEvidence | None = None
     message: str | None = None
 
 
@@ -68,6 +76,11 @@ class ApplicationAdapter(Protocol):
         profile: ApplicationProfile,
     ) -> PreparationResult: ...
 
-    def submit(self, application: Application) -> AdapterSubmissionResult: ...
+    def submit(
+        self,
+        application: Application,
+        *,
+        approved: bool = False,
+    ) -> AdapterSubmissionResult: ...
 
     def verify_result(self, application: Application) -> AdapterVerificationResult: ...

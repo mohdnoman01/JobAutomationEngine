@@ -25,6 +25,12 @@ Run:
 python -m pytest
 ```
 
+## Playwright browser driver
+
+Install the Playwright Python dependency with `python -m pip install -r requirements.txt`.
+Install its Chromium browser binary separately with `python -m playwright install chromium`.
+The application does not download browser binaries automatically.
+
 ## Roadmap
 
 - Lever parser

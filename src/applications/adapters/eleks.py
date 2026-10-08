@@ -10,7 +10,17 @@ from src.applications.adapters.base import (
     InspectionResult,
     PreparationResult,
 )
-from src.applications.adapters.browser import BrowserAutomation, BrowserField, BrowserPageSnapshot
+from src.applications.adapters.browser import (
+    BrowserAutomation,
+    BrowserField,
+    BrowserHumanActionRequired,
+    BrowserPageSnapshot,
+    BrowserSubmissionOutcome,
+)
+from src.applications.adapters.verification import (
+    SubmissionVerifier,
+    VisibleConfirmationTextVerifier,
+)
 from src.applications.models import Application
 from src.applications.profile import ApplicationProfile
 from src.applications.submission import (
@@ -60,9 +70,21 @@ class EleksAdapter(ApplicationAdapter):
 
     platform = "eleks_gravity_forms"
 
-    def __init__(self, browser: BrowserAutomation) -> None:
+    def __init__(
+        self,
+        browser: BrowserAutomation,
+        *,
+        verifier: SubmissionVerifier | None = None,
+    ) -> None:
         self.browser = browser
+        self.verifier = verifier or VisibleConfirmationTextVerifier(
+            browser,
+            confirmation_marker=None,
+        )
         self._preparation_statuses: dict[str, ApplicationResultStatus] = {}
+        self._preparation_results: dict[str, PreparationResult] = {}
+        self._verification_results: dict[str, AdapterVerificationResult] = {}
+        self._submission_attempted: set[str] = set()
 
     def can_handle(self, job: Job) -> bool:
         parsed = urlsplit(job.url)
@@ -75,6 +97,8 @@ class EleksAdapter(ApplicationAdapter):
     def inspect(self, job: Job) -> InspectionResult:
         try:
             return self._inspect(job)
+        except BrowserHumanActionRequired as exc:
+            return self._human_action(str(exc))
         except Exception as exc:
             return InspectionResult(
                 status=ApplicationResultStatus.failed,
@@ -192,6 +216,9 @@ class EleksAdapter(ApplicationAdapter):
         application: Application,
         profile: ApplicationProfile,
     ) -> PreparationResult:
+        application_key = normalize_job_url(application.job_url)
+        self._preparation_results.pop(application_key, None)
+        self._verification_results.pop(application_key, None)
         job = Job(
             title=application.job_title,
             company=application.company,
@@ -280,6 +307,28 @@ class EleksAdapter(ApplicationAdapter):
                 payload.review_questions.append(question)
                 payload.unanswered_review_questions.append(question)
 
+        try:
+            self._apply_prepared_values(inspection, payload)
+        except BrowserHumanActionRequired as exc:
+            human_inspection = self._human_action(str(exc))
+            result = PreparationResult(
+                status=ApplicationResultStatus.human_action_required,
+                inspection=human_inspection,
+                payload=payload,
+                message=str(exc),
+            )
+            self._preparation_statuses[normalize_job_url(application.job_url)] = result.status
+            return result
+        except Exception as exc:
+            result = PreparationResult(
+                status=ApplicationResultStatus.failed,
+                inspection=inspection,
+                payload=payload,
+                message=f"ELEKS form preparation failed: {exc}",
+            )
+            self._preparation_statuses[normalize_job_url(application.job_url)] = result.status
+            return result
+
         status = (
             ApplicationResultStatus.needs_review
             if payload.needs_review
@@ -296,32 +345,235 @@ class EleksAdapter(ApplicationAdapter):
             ),
         )
         self._preparation_statuses[normalize_job_url(application.job_url)] = status
+        self._preparation_results[normalize_job_url(application.job_url)] = result
         return result
 
-    def submit(self, application: Application) -> AdapterSubmissionResult:
-        previous_status = self._preparation_statuses.get(
-            normalize_job_url(application.job_url)
+    def _apply_prepared_values(
+        self,
+        inspection: InspectionResult,
+        payload: ApplicationPayload,
+    ) -> None:
+        safe_text_labels = {
+            "full name",
+            "name",
+            "email",
+            "email address",
+            "phone",
+            "phone number",
+            "telephone",
+        }
+        safe_file_labels = {"attach a cv", "cv", "resume", "attach cv"}
+        update_field = next(
+            (
+                field
+                for field in inspection.fields
+                if field.kind.casefold() == "checkbox"
+                and _normalize_label(field.label) == VACANCY_UPDATE_LABEL
+                and not field.honeypot
+            ),
+            None,
         )
-        if previous_status == ApplicationResultStatus.needs_review:
+
+        actions: list[tuple[str, str, str | bool]] = []
+        for field in inspection.fields:
+            if field.honeypot:
+                continue
+            label = _normalize_label(field.label)
+            if field.kind.casefold() == "file" and label in safe_file_labels:
+                if field.key in payload.fields:
+                    actions.append(("upload", field.key, payload.fields[field.key]))
+            elif (
+                field.kind.casefold() == "checkbox"
+                and update_field is not None
+                and field.key == update_field.key
+            ):
+                if field.key in payload.fields:
+                    actions.append(
+                        ("checkbox", field.key, payload.fields[field.key].casefold() == "true")
+                    )
+            elif field.kind.casefold() != "file" and label in safe_text_labels:
+                if field.key in payload.fields:
+                    actions.append(("fill", field.key, payload.fields[field.key]))
+
+        for action, key, value in actions:
+            self._stop_if_human_action_required()
+            if action == "upload":
+                self.browser.upload_file(key, str(value))
+            elif action == "checkbox":
+                self.browser.set_checkbox(key, bool(value))
+            else:
+                self.browser.fill_field(key, str(value))
+            self._stop_if_human_action_required()
+
+    def _stop_if_human_action_required(self) -> None:
+        challenge = self.browser.detect_human_action()
+        if challenge:
+            raise BrowserHumanActionRequired(challenge)
+
+    def submit(
+        self,
+        application: Application,
+        *,
+        approved: bool = False,
+    ) -> AdapterSubmissionResult:
+        application_key = normalize_job_url(application.job_url)
+        if approved is not True:
             return AdapterSubmissionResult(
                 status=ApplicationResultStatus.needs_review,
-                message="Submission is blocked while application review is required.",
+                receipt=SubmissionReceipt(
+                    submission_outcome=SubmissionOutcome.not_started,
+                    error_message="Explicit human approval is required before submission.",
+                ),
+                message="Explicit human approval is required before submission.",
             )
 
-        return AdapterSubmissionResult(
-            status=ApplicationResultStatus.unsupported,
-            receipt=SubmissionReceipt(
-                submission_outcome=SubmissionOutcome.not_started,
-                error_message="ELEKS submission is intentionally not implemented.",
-            ),
-            message="ELEKS submission is disabled; no Send control was activated.",
+        preparation = self._preparation_results.get(application_key)
+        if (
+            preparation is None
+            or preparation.status
+            not in {
+                ApplicationResultStatus.needs_review,
+                ApplicationResultStatus.ready_to_submit,
+            }
+            or preparation.payload is None
+        ):
+            return self._not_started(
+                ApplicationResultStatus.unsupported,
+                "A successful ELEKS preparation is required before submission.",
+            )
+        if application_key in self._submission_attempted:
+            return self._not_started(
+                ApplicationResultStatus.duplicate_submission_blocked,
+                "A submission attempt already started; duplicate submission is blocked.",
+            )
+        if preparation.payload.missing_profile_questions:
+            return self._not_started(
+                ApplicationResultStatus.needs_review,
+                "Required profile fields are missing; submission remains blocked.",
+            )
+
+        try:
+            challenge = self.browser.detect_human_action()
+        except Exception as exc:
+            return self._not_started(
+                ApplicationResultStatus.failed,
+                f"Browser state failed before submission: {exc}",
+            )
+        if challenge:
+            return AdapterSubmissionResult(
+                status=ApplicationResultStatus.human_action_required,
+                receipt=SubmissionReceipt(
+                    submission_outcome=SubmissionOutcome.not_started,
+                    error_message=challenge,
+                    human_action_required=True,
+                ),
+                message=challenge,
+            )
+
+        self._submission_attempted.add(application_key)
+        try:
+            browser_result = self.browser.submit_form(approved=True)
+        except Exception as exc:
+            # A port exception does not prove that the browser action never began.
+            return self._verify_started_submission(
+                application_key,
+                attempt_message=f"Browser submit outcome is ambiguous: {exc}",
+            )
+
+        if not browser_result.action_started:
+            if browser_result.human_action_required:
+                self._submission_attempted.discard(application_key)
+                return AdapterSubmissionResult(
+                    status=ApplicationResultStatus.human_action_required,
+                    receipt=SubmissionReceipt(
+                        submission_outcome=SubmissionOutcome.not_started,
+                        error_message=browser_result.message,
+                        human_action_required=True,
+                    ),
+                    message=browser_result.message,
+                )
+            if browser_result.outcome == BrowserSubmissionOutcome.unknown:
+                return self._unknown_submission(browser_result.message)
+            self._submission_attempted.discard(application_key)
+            return self._not_started(
+                ApplicationResultStatus.failed,
+                browser_result.message or "The browser did not start submission.",
+            )
+
+        return self._verify_started_submission(
+            application_key,
+            attempt_message=browser_result.message,
+        )
+
+    def _verify_started_submission(
+        self,
+        application_key: str,
+        *,
+        attempt_message: str | None,
+    ) -> AdapterSubmissionResult:
+        try:
+            verification = self.verifier.verify()
+        except Exception as exc:
+            verification = AdapterVerificationResult(
+                status=ApplicationResultStatus.unknown_submission_result,
+                verification=SubmissionVerification(
+                    outcome=VerificationOutcome.unknown,
+                    evidence=f"Submission verification failed: {exc}",
+                ),
+                message=f"Submission verification failed: {exc}",
+            )
+        self._verification_results[application_key] = verification
+
+        if verification.verification.outcome == VerificationOutcome.verified:
+            return AdapterSubmissionResult(
+                status=ApplicationResultStatus.submitted,
+                receipt=SubmissionReceipt(
+                    submission_outcome=SubmissionOutcome.submitted,
+                ),
+                message=verification.message,
+            )
+        return self._unknown_submission(
+            attempt_message or verification.message
         )
 
     def verify_result(self, application: Application) -> AdapterVerificationResult:
-        return AdapterVerificationResult(
+        return self._verification_results.get(
+            normalize_job_url(application.job_url),
+            AdapterVerificationResult(
+                status=ApplicationResultStatus.unknown_submission_result,
+                verification=SubmissionVerification(
+                    outcome=VerificationOutcome.unknown,
+                    evidence="No approved submission attempt is available to verify.",
+                ),
+                message="No approved submission attempt is available to verify.",
+            ),
+        )
+
+    @staticmethod
+    def _not_started(
+        status: ApplicationResultStatus,
+        message: str,
+    ) -> AdapterSubmissionResult:
+        return AdapterSubmissionResult(
+            status=status,
+            receipt=SubmissionReceipt(
+                submission_outcome=SubmissionOutcome.not_started,
+                error_message=message,
+            ),
+            message=message,
+        )
+
+    @staticmethod
+    def _unknown_submission(message: str | None) -> AdapterSubmissionResult:
+        explanation = message or "Submission may have started, but its outcome is unknown."
+        return AdapterSubmissionResult(
             status=ApplicationResultStatus.unknown_submission_result,
-            verification=SubmissionVerification(outcome=VerificationOutcome.unknown),
-            message="No submission was performed, so there is no result to verify.",
+            receipt=SubmissionReceipt(
+                submission_outcome=SubmissionOutcome.unknown,
+                error_message=explanation,
+                retryable=False,
+            ),
+            message=explanation,
         )
 
     def _human_action(

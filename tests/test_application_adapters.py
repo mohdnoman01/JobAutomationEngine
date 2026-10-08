@@ -5,6 +5,7 @@ from pathlib import Path
 from src.applications.adapters.browser import (
     BrowserControl,
     BrowserField,
+    BrowserHumanActionRequired,
     BrowserPageSnapshot,
 )
 from src.applications.adapters.eleks import EleksAdapter
@@ -77,6 +78,7 @@ class FakeBrowser:
         self.clicked = []
         self.filled = []
         self.uploaded = []
+        self.checkboxes = []
         self.submit_calls = 0
 
     def open_url(self, url):
@@ -100,11 +102,15 @@ class FakeBrowser:
     def upload_file(self, key, path):
         self.uploaded.append((key, path))
 
+    def set_checkbox(self, key, checked):
+        self.checkboxes.append((key, checked))
+
     def detect_human_action(self):
         return self.challenge
 
-    def submit_form(self):
-        self.submit_calls += 1
+    def submit_form(self, *, approved):
+        if approved:
+            self.submit_calls += 1
         raise AssertionError("ELEKS adapter must never submit")
 
     def inspect_result(self):
@@ -195,7 +201,24 @@ def test_security_challenge_stops_before_apply_interaction():
     assert browser.clicked == []
     assert browser.filled == []
     assert browser.uploaded == []
+    assert browser.checkboxes == []
     assert browser.submit_calls == 0
+
+
+def test_security_challenge_during_browser_interaction_requires_human_action():
+    page = BrowserPageSnapshot(
+        url=ELEKS_URL,
+        controls=[BrowserControl(label="Apply", selector="#apply", safe_to_click=True)],
+    )
+
+    class ChallengingBrowser(FakeBrowser):
+        def click_safe_control(self, selector):
+            raise BrowserHumanActionRequired("MFA challenge detected")
+
+    result = EleksAdapter(ChallengingBrowser(page)).inspect(make_job())
+
+    assert result.status == ApplicationResultStatus.human_action_required
+    assert "MFA challenge" in result.message
 
 
 def test_browser_exception_becomes_structured_inspection_failure():
@@ -236,8 +259,13 @@ def test_prepare_maps_profile_fields_and_defaults_vacancy_updates_off(tmp_path):
     assert [question.label for question in result.payload.unanswered_review_questions] == [
         "Message"
     ]
-    assert browser.filled == []
-    assert browser.uploaded == []
+    assert browser.filled == [
+        ("input_1", "Example Candidate"),
+        ("input_2", "candidate@example.test"),
+        ("input_3", "+1 555 0100"),
+    ]
+    assert browser.uploaded == [("input_6", str(resume))]
+    assert browser.checkboxes == [("input_4.1", False)]
     assert browser.submit_calls == 0
 
 
@@ -302,15 +330,21 @@ def test_prepare_review_blocks_submit_and_verification_is_unknown(tmp_path):
 
     assert prepared.status == ApplicationResultStatus.needs_review
     assert submitted.status == ApplicationResultStatus.needs_review
-    assert submitted.receipt is None
+    assert submitted.receipt.submission_outcome.value == "not_started"
+    assert "approval" in submitted.message.casefold()
     assert verification.status == ApplicationResultStatus.unknown_submission_result
     assert verification.verification.outcome == VerificationOutcome.unknown
     assert browser.submit_calls == 0
-    assert browser.filled == []
-    assert browser.uploaded == []
+    assert browser.filled == [
+        ("input_1", "Example Candidate"),
+        ("input_2", "candidate@example.test"),
+        ("input_3", "+1 555 0100"),
+    ]
+    assert browser.uploaded == [("input_6", str(resume))]
+    assert browser.checkboxes == [("input_4.1", False)]
 
 
-def test_submit_is_disabled_even_when_preparation_is_ready(tmp_path):
+def test_ready_preparation_still_requires_explicit_submission_approval(tmp_path):
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"test resume fixture")
     adapter = EleksAdapter(FakeReadyPage())
@@ -327,8 +361,9 @@ def test_submit_is_disabled_even_when_preparation_is_ready(tmp_path):
     result = adapter.submit(application)
 
     assert prepared.status == ApplicationResultStatus.ready_to_submit
-    assert result.status == ApplicationResultStatus.unsupported
+    assert result.status == ApplicationResultStatus.needs_review
     assert result.receipt.submission_outcome.value == "not_started"
+    assert "approval" in result.message.casefold()
     assert adapter.browser.submit_calls == 0
 
 
