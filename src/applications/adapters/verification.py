@@ -8,24 +8,26 @@ from src.applications.adapters.base import (
 )
 from src.applications.adapters.browser import BrowserAutomation
 from src.applications.submission import (
+    ApplicationAttempt,
     ApplicationResultStatus,
     SubmissionVerification,
     VerificationOutcome,
 )
+from src.research.job_normalizer import normalize_job_url
 
 
 class SubmissionVerifier(Protocol):
     """Adapter-level strategy for interpreting platform-specific evidence."""
 
-    def verify(self) -> AdapterVerificationResult: ...
+    def verify(self, *, attempt: ApplicationAttempt) -> AdapterVerificationResult: ...
 
 
 class VisibleConfirmationTextVerifier:
     """Verify only when an explicitly configured confirmation phrase is visible.
 
-    A missing marker, security gate, or browser failure remains unknown. The
-    strategy never clicks or submits and is intended to run after an adapter's
-    submission action has reported that it may have started.
+    A phrase is accepted only alongside explicit page context matching the
+    current application, normalized job URL, and attempt number. Local fixture
+    context does not establish production ELEKS confirmation behavior.
     """
 
     def __init__(
@@ -39,7 +41,7 @@ class VisibleConfirmationTextVerifier:
             confirmation_marker.strip() if confirmation_marker else None
         )
 
-    def verify(self) -> AdapterVerificationResult:
+    def verify(self, *, attempt: ApplicationAttempt) -> AdapterVerificationResult:
         if not self.confirmation_marker:
             return self._unknown("No adapter confirmation marker is configured.")
 
@@ -61,6 +63,16 @@ class VisibleConfirmationTextVerifier:
             return self._unknown(
                 "The configured confirmation evidence was not present on the page."
             )
+        if (
+            page.confirmation_application_id != attempt.application_id
+            or page.confirmation_job_url is None
+            or normalize_job_url(page.confirmation_job_url)
+            != normalize_job_url(attempt.job_url)
+            or page.confirmation_attempt_number != attempt.attempt_number
+        ):
+            return self._unknown(
+                "Confirmation text was not bound to the current application attempt."
+            )
         observed_marker = page.body_text[
             marker_offset : marker_offset + len(self.confirmation_marker)
         ]
@@ -70,6 +82,9 @@ class VisibleConfirmationTextVerifier:
             page_url=page.url,
             expected_marker=self.confirmation_marker,
             observed_marker=observed_marker,
+            application_id=attempt.application_id,
+            job_url=attempt.job_url,
+            attempt_number=attempt.attempt_number,
         )
         return AdapterVerificationResult(
             status=ApplicationResultStatus.submitted,
@@ -78,6 +93,9 @@ class VisibleConfirmationTextVerifier:
                 evidence=(
                     f"Visible confirmation text matched: {self.confirmation_marker}"
                 ),
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
             ),
             evidence=evidence,
             message="Submission verified using explicit adapter confirmation evidence.",

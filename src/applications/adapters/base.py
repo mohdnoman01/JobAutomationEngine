@@ -48,6 +48,9 @@ class SubmissionEvidence(BaseModel):
     page_url: str | None = None
     expected_marker: str | None = None
     observed_marker: str | None = None
+    application_id: str | None = None
+    job_url: str | None = None
+    attempt_number: int | None = None
 
 
 class AdapterSubmissionResult(BaseModel):

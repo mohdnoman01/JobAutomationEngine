@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    msvcrt = None
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    fcntl = None
 
 
 class AttemptOutcome(StrEnum):
@@ -87,6 +99,13 @@ class AttemptStore:
         ]
         return max(matching, key=lambda attempt: attempt.attempt_number, default=None)
 
+    def has_submission_in_progress(self, application_id: str) -> bool:
+        return any(
+            attempt.application_id == application_id
+            and attempt.outcome == AttemptOutcome.submitting
+            for attempt in self.list()
+        )
+
     def start(
         self,
         *,
@@ -96,50 +115,151 @@ class AttemptStore:
         job_url: str,
         platform: str,
     ) -> ApplicationAttempt:
-        attempts = self.list()
-        attempt = ApplicationAttempt(
-            application_id=application_id,
-            company=company,
-            job_title=job_title,
-            job_url=job_url,
-            platform=platform,
-            attempt_number=1 + max(
-                (
-                    item.attempt_number
-                    for item in attempts
-                    if item.application_id == application_id
+        with self._locked():
+            attempts = self.list()
+            attempt = ApplicationAttempt(
+                application_id=application_id,
+                company=company,
+                job_title=job_title,
+                job_url=job_url,
+                platform=platform,
+                attempt_number=1 + max(
+                    (
+                        item.attempt_number
+                        for item in attempts
+                        if item.application_id == application_id
+                    ),
+                    default=0,
                 ),
-                default=0,
-            ),
-            started_at=datetime.now(timezone.utc),
-        )
-        attempts.append(attempt)
-        self._save(attempts)
-        return attempt
+                started_at=datetime.now(timezone.utc),
+            )
+            attempts.append(attempt)
+            self._save(attempts)
+            return attempt
+
+    def claim_submission(
+        self,
+        *,
+        application_id: str,
+        company: str,
+        job_title: str,
+        job_url: str,
+        platform: str,
+        attempt: ApplicationAttempt | None = None,
+    ) -> ApplicationAttempt | None:
+        """Persist a one-use submit claim under a process-shared file lock.
+
+        Direct adapter claims are never recycled. The engine can claim its
+        current attempt after its explicit retry policy has admitted it.
+        """
+        with self._locked():
+            attempts = self.list()
+            prior = [item for item in attempts if item.application_id == application_id]
+            if attempt is None and prior:
+                return None
+            if any(
+                item.outcome
+                in {
+                    AttemptOutcome.submitting,
+                    AttemptOutcome.submitted,
+                    AttemptOutcome.unknown_submission_result,
+                }
+                for item in prior
+            ):
+                return None
+            if attempt is not None:
+                claimed = attempt.model_copy(
+                    update={
+                        "current_step": "submit",
+                        "last_successful_step": "fill",
+                        "outcome": AttemptOutcome.submitting,
+                        "submission_outcome": SubmissionOutcome.unknown,
+                        "retryable": False,
+                    }
+                )
+                for index, existing in enumerate(attempts):
+                    if (existing.application_id, existing.attempt_number) == (
+                        attempt.application_id,
+                        attempt.attempt_number,
+                    ):
+                        attempts[index] = claimed
+                        break
+                else:
+                    return None
+            else:
+                claimed = ApplicationAttempt(
+                    application_id=application_id,
+                    company=company,
+                    job_title=job_title,
+                    job_url=job_url,
+                    platform=platform,
+                    attempt_number=1 + max((item.attempt_number for item in prior), default=0),
+                    started_at=datetime.now(timezone.utc),
+                    current_step="submit",
+                    outcome=AttemptOutcome.submitting,
+                    submission_outcome=SubmissionOutcome.unknown,
+                )
+                attempts.append(claimed)
+            self._save(attempts)
+            return claimed
 
     def update(self, attempt: ApplicationAttempt, **changes: object) -> ApplicationAttempt:
-        attempts = self.list()
-        changes = {key: value for key, value in changes.items() if value is not None}
-        for index, existing in enumerate(attempts):
-            if (
-                existing.application_id == attempt.application_id
-                and existing.attempt_number == attempt.attempt_number
-            ):
-                updated = existing.model_copy(update=changes)
-                attempts[index] = updated
-                self._save(attempts)
-                return updated
+        with self._locked():
+            attempts = self.list()
+            changes = {key: value for key, value in changes.items() if value is not None}
+            for index, existing in enumerate(attempts):
+                if (
+                    existing.application_id == attempt.application_id
+                    and existing.attempt_number == attempt.attempt_number
+                ):
+                    updated = existing.model_copy(update=changes)
+                    attempts[index] = updated
+                    self._save(attempts)
+                    return updated
         raise ValueError("Application attempt not found")
 
     def _save(self, attempts: list[ApplicationAttempt]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(
-                [attempt.model_dump(mode="json") for attempt in attempts],
-                indent=2,
-            ),
-            encoding="utf-8",
+        content = json.dumps(
+            [attempt.model_dump(mode="json") for attempt in attempts], indent=2
         )
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f"{self.path.name}.", suffix=".tmp", dir=self.path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_name, self.path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    @contextmanager
+    def _locked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"0")
+        with os.fdopen(descriptor, "r+b", buffering=0) as lock_file:
+            if msvcrt is not None:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover
+                raise RuntimeError("No supported file locking implementation")
 
 
 class RecoveryQueue:

@@ -12,11 +12,14 @@ from src.applications.adapters.browser import (
     BrowserSubmissionResult,
     PlaywrightBrowser,
 )
+from src.applications.adapters.base import AdapterVerificationResult
 from src.applications.adapters.eleks import ELEKS_HOST, EleksAdapter
 from src.applications.adapters.verification import VisibleConfirmationTextVerifier
 from src.applications.models import Application
 from src.applications.profile import ApplicationProfile
-from src.applications.submission import ApplicationResultStatus, VerificationOutcome
+from src.applications.submission import ApplicationResultStatus, VerificationOutcome, application_id_for
+from src.applications.submission import ReviewApproval
+from src.applications.recovery import AttemptStore
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "browser_driver.html"
@@ -51,6 +54,7 @@ class LocalEleksBrowser:
         self.checkboxes: list[tuple[str, bool]] = []
         self.clicked: list[str] = []
         self.submit_calls = 0
+        self.attempt_store = None
 
     def open_url(self, url: str) -> None:
         self.requested_urls.append(url)
@@ -87,7 +91,18 @@ class LocalEleksBrowser:
         return self.driver.submit_form(approved=approved)
 
     def inspect_result(self) -> BrowserPageSnapshot:
-        return self.driver.inspect_result()
+        page = self.driver.inspect_result()
+        if self.attempt_store is None:
+            return page
+        attempt = self.attempt_store.latest_for(application_id_for(ELEKS_URL))
+        if attempt is None or CONFIRMATION_MARKER not in page.body_text:
+            return page
+        # Deterministic fixture-only context; this is not asserted to exist on ELEKS.
+        return page.model_copy(update={
+            "confirmation_application_id": attempt.application_id,
+            "confirmation_job_url": attempt.job_url,
+            "confirmation_attempt_number": attempt.attempt_number,
+        })
 
 
 @pytest.fixture
@@ -219,7 +234,13 @@ def test_eleks_browser_fill_failure_becomes_structured_failure(driver):
 def _prepare_submission_adapter(browser, tmp_path, *, verifier=None):
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"local resume fixture")
-    adapter = EleksAdapter(browser, verifier=verifier)
+    attempt_store = AttemptStore(tmp_path / "attempts.json")
+    browser.attempt_store = attempt_store
+    adapter = EleksAdapter(
+        browser,
+        verifier=verifier,
+        attempt_store=attempt_store,
+    )
     result = adapter.prepare(
         make_application(),
         ApplicationProfile(
@@ -231,6 +252,15 @@ def _prepare_submission_adapter(browser, tmp_path, *, verifier=None):
     )
     assert result.status == ApplicationResultStatus.needs_review
     return adapter
+
+
+def _approval(adapter):
+    payload = next(iter(adapter._preparation_results.values())).payload
+    return ReviewApproval.approve(
+        payload,
+        job_url=ELEKS_URL,
+        acknowledged_question_keys={question.key for question in payload.unanswered_review_questions},
+    )
 
 
 def test_submission_requires_explicit_approval_then_verifies_local_confirmation(
@@ -249,15 +279,43 @@ def test_submission_requires_explicit_approval_then_verifies_local_confirmation(
     assert "approval" in blocked.message.casefold()
     assert browser.submit_calls == 0
 
-    submitted = adapter.submit(make_application(), approved=True)
+    approval = _approval(adapter)
+    submitted = adapter.submit(make_application(), approval=approval)
 
     assert submitted.status == ApplicationResultStatus.submitted
     assert submitted.receipt.submission_outcome.value == "submitted"
     assert adapter.verify_result(make_application()).verification.outcome == VerificationOutcome.verified
     assert browser.submit_calls == 1
     assert browser.driver.inspect_page().title == "Local Confirmation Fixture"
-    assert adapter.submit(make_application(), approved=True).status == ApplicationResultStatus.duplicate_submission_blocked
+    assert adapter.submit(make_application(), approval=approval).status == ApplicationResultStatus.duplicate_submission_blocked
     assert browser.submit_calls == 1
+
+
+def test_verified_without_evidence_is_unknown_and_does_not_complete_platform_attempt(
+    driver, tmp_path
+):
+    class EvidenceFreeVerifier:
+        def verify(self):
+            from src.applications.submission import SubmissionVerification
+
+            return AdapterVerificationResult(
+                status=ApplicationResultStatus.submitted,
+                verification=SubmissionVerification(
+                    outcome=VerificationOutcome.verified,
+                    evidence=None,
+                ),
+            )
+
+    browser = LocalEleksBrowser(driver, SUBMISSION_FIXTURE.resolve().as_uri())
+    adapter = _prepare_submission_adapter(
+        browser, tmp_path, verifier=EvidenceFreeVerifier()
+    )
+    result = adapter.submit(make_application(), approval=_approval(adapter))
+
+    assert result.status == ApplicationResultStatus.unknown_submission_result
+    persisted = AttemptStore(tmp_path / "attempts.json").list()
+    assert persisted[-1].outcome.value == "unknown_submission_result"
+    assert persisted[-1].verification_result is not True
 
 
 def test_page_change_without_explicit_confirmation_is_unknown_and_not_retried(
@@ -266,13 +324,48 @@ def test_page_change_without_explicit_confirmation_is_unknown_and_not_retried(
     browser = LocalEleksBrowser(driver, NO_CONFIRMATION_FIXTURE.resolve().as_uri())
     adapter = _prepare_submission_adapter(browser, tmp_path)
 
-    submitted = adapter.submit(make_application(), approved=True)
-    repeated = adapter.submit(make_application(), approved=True)
+    approval = _approval(adapter)
+    submitted = adapter.submit(make_application(), approval=approval)
+    repeated = adapter.submit(make_application(), approval=approval)
 
     assert submitted.status == ApplicationResultStatus.unknown_submission_result
     assert submitted.receipt.submission_outcome.value == "unknown"
     assert not submitted.receipt.retryable
     assert repeated.status == ApplicationResultStatus.duplicate_submission_blocked
+    assert browser.submit_calls == 1
+    recreated = _prepare_submission_adapter(browser, tmp_path)
+    after_reload = recreated.submit(make_application(), approval=_approval(recreated))
+    assert after_reload.status == ApplicationResultStatus.duplicate_submission_blocked
+    assert browser.submit_calls == 1
+
+
+def test_eleks_duplicate_is_blocked_after_adapter_recreation_and_state_reload(driver, tmp_path):
+    attempts_path = tmp_path / "durable-attempts.json"
+    browser = LocalEleksBrowser(driver, SUBMISSION_FIXTURE.resolve().as_uri())
+    verifier = VisibleConfirmationTextVerifier(
+        browser, confirmation_marker=CONFIRMATION_MARKER
+    )
+    first = EleksAdapter(browser, verifier=verifier, attempt_store=AttemptStore(attempts_path))
+    browser.attempt_store = first.attempt_store
+    resume = tmp_path / "candidate.pdf"
+    resume.write_bytes(b"local resume fixture")
+    profile = ApplicationProfile(
+        name="Example Candidate", email="candidate@example.test",
+        phone="+1 555 0100", resume_path=resume,
+    )
+    first.prepare(make_application(), profile)
+    submitted = first.submit(make_application(), approval=_approval(first))
+    assert submitted.status == ApplicationResultStatus.submitted
+
+    recreated = EleksAdapter(
+        browser,
+        verifier=verifier,
+        attempt_store=AttemptStore(attempts_path),
+    )
+    recreated.prepare(make_application(), profile)
+    blocked = recreated.submit(make_application(), approval=_approval(recreated))
+
+    assert blocked.status == ApplicationResultStatus.duplicate_submission_blocked
     assert browser.submit_calls == 1
 
 
@@ -289,7 +382,7 @@ def test_ambiguous_browser_failure_after_click_remains_unknown(driver, tmp_path)
     browser = AmbiguousBrowser(driver, SUBMISSION_FIXTURE.resolve().as_uri())
     adapter = _prepare_submission_adapter(browser, tmp_path)
 
-    result = adapter.submit(make_application(), approved=True)
+    result = adapter.submit(make_application(), approval=_approval(adapter))
 
     assert result.status == ApplicationResultStatus.unknown_submission_result
     assert result.receipt.submission_outcome.value == "unknown"
@@ -309,7 +402,7 @@ def test_security_challenge_before_submit_stops_without_browser_submit(driver, t
     adapter = _prepare_submission_adapter(browser, tmp_path)
     browser.challenge_armed = True
 
-    result = adapter.submit(make_application(), approved=True)
+    result = adapter.submit(make_application(), approval=_approval(adapter))
 
     assert result.status == ApplicationResultStatus.human_action_required
     assert result.receipt.submission_outcome.value == "not_started"
@@ -330,7 +423,7 @@ def test_security_challenge_after_submit_is_unknown(driver, tmp_path):
         ),
     )
 
-    result = adapter.submit(make_application(), approved=True)
+    result = adapter.submit(make_application(), approval=_approval(adapter))
 
     assert result.status == ApplicationResultStatus.unknown_submission_result
     assert result.receipt.submission_outcome.value == "unknown"

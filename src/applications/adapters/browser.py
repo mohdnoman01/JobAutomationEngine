@@ -35,6 +35,9 @@ class BrowserPageSnapshot(BaseModel):
     controls: list[BrowserControl] = Field(default_factory=list)
     # A driver must surface challenges as state, never attempt to solve them.
     human_action_required: str | None = None
+    confirmation_application_id: str | None = None
+    confirmation_job_url: str | None = None
+    confirmation_attempt_number: int | None = None
 
 
 class BrowserInteractionError(RuntimeError):
@@ -137,9 +140,13 @@ class PlaywrightBrowser:
                       : (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || '');
                     const key = el.name || el.id || `field_${i}`;
                     const accept = (el.getAttribute('accept') || '').split(',').map(x => x.trim()).filter(Boolean);
+                    const style = window.getComputedStyle(el);
+                    const hidden = !el.getClientRects().length || style.display === 'none' || style.visibility === 'hidden';
+                    const ancestry = el.closest('[aria-hidden="true"], [class*="honeypot" i], [id*="honeypot" i], .gform_validation_container');
+                    const suspiciousName = /honeypot|hp_|website_url|your_url/i.test(`${el.name} ${el.id}`);
                     return {key, label, kind: el.type || el.tagName.toLowerCase(), required: !!el.required,
                       accept, max_file_size: null,
-                      honeypot: !!(el.closest('[aria-hidden="true"]') || el.getAttribute('tabindex') === '-1')};
+                      honeypot: !!(ancestry || hidden || suspiciousName || el.getAttribute('tabindex') === '-1')};
                 })"""
             )
             controls = self._page.locator("button, input[type=submit], input[type=button], a").evaluate_all(
@@ -155,6 +162,24 @@ class PlaywrightBrowser:
             form_action = form.get_attribute("action") if form_found else None
             form_method = form.get_attribute("method") if form_found else None
             form_enctype = form.get_attribute("enctype") if form_found else None
+            confirmation_context = self._page.locator(
+                "[data-submission-context]"
+            ).first
+            confirmation_application_id = (
+                confirmation_context.get_attribute("data-application-id")
+                if confirmation_context.count()
+                else None
+            )
+            confirmation_job_url = (
+                confirmation_context.get_attribute("data-job-url")
+                if confirmation_context.count()
+                else None
+            )
+            confirmation_attempt = (
+                confirmation_context.get_attribute("data-attempt-number")
+                if confirmation_context.count()
+                else None
+            )
             return BrowserPageSnapshot(
                 url=self._page.url,
                 title=self._page.title(),
@@ -166,6 +191,11 @@ class PlaywrightBrowser:
                 fields=fields,
                 controls=controls,
                 human_action_required=challenge,
+                confirmation_application_id=confirmation_application_id,
+                confirmation_job_url=confirmation_job_url,
+                confirmation_attempt_number=(
+                    int(confirmation_attempt) if confirmation_attempt else None
+                ),
             )
         except BrowserInteractionError:
             raise
@@ -219,6 +249,7 @@ class PlaywrightBrowser:
             raise BrowserInteractionError(f"Browser file upload failed: {exc}") from exc
 
     def detect_human_action(self) -> str | None:
+        """Detect known security states conservatively; heuristics are not exhaustive."""
         try:
             url = self._page.url.casefold()
             title = self._page.title().casefold()
@@ -235,6 +266,19 @@ class PlaywrightBrowser:
                 ("login", "Authentication is required; human action is required."),
                 ("access denied", "Security gate detected; human action is required."),
                 ("unusual traffic", "Security gate detected; human action is required."),
+                ("verify you are human", "Security challenge detected; human action is required."),
+                ("checking your browser", "Security challenge detected; human action is required."),
+                ("security check", "Security challenge detected; human action is required."),
+                ("robot or human", "Security challenge detected; human action is required."),
+                ("automated request", "Security challenge detected; human action is required."),
+                ("automated traffic", "Security challenge detected; human action is required."),
+                ("human verification", "Security challenge detected; human action is required."),
+                ("security verification", "Security challenge detected; human action is required."),
+                ("cloudflare", "Security challenge detected; human action is required."),
+                ("single sign-on", "Authentication is required; human action is required."),
+                ("sso", "Authentication is required; human action is required."),
+                ("authenticate", "Authentication is required; human action is required."),
+                ("password", "Authentication is required; human action is required."),
             )
             combined = f"{url} {title} {body}"
             for marker, message in checks:
@@ -246,6 +290,15 @@ class PlaywrightBrowser:
             )
             if challenge_selector.count():
                 return "Security or MFA challenge detected; human action is required."
+            if self._page.locator('input[type="password"]').count():
+                return "Authentication form detected; human action is required."
+            if self._page.locator(
+                'form[action*="login" i], form[action*="auth" i], '
+                'form[action*="sso" i], [data-sitekey]'
+            ).count():
+                return "Authentication or security challenge detected; human action is required."
+            if any(marker in url for marker in ("/login", "/signin", "/sign-in", "/auth/", "/sso/")):
+                return "Authentication redirect detected; human action is required."
             return None
         except Exception as exc:
             raise BrowserInteractionError(f"Browser challenge inspection failed: {exc}") from exc
@@ -368,7 +421,7 @@ class InMemoryBrowser:
         if operation in self.failures:
             raise BrowserInteractionError(self.failures[operation])
         if self.challenge:
-            raise BrowserInteractionError(
+            raise BrowserHumanActionRequired(
                 f"Human action required: {self.challenge}"
             )
 

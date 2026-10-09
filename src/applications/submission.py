@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -76,6 +77,49 @@ class ApplicationPayload(BaseModel):
             self.unanswered_review_questions or self.missing_profile_questions
         )
 
+    def fingerprint(self) -> str:
+        canonical = json.dumps(
+            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+        return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class ReviewApproval(BaseModel):
+    """Approval for one exact payload; recreate it after any payload edit."""
+    application_id: str
+    job_url: str
+    payload_fingerprint: str
+    decision: bool
+    acknowledged_question_keys: frozenset[str] = frozenset()
+
+    @classmethod
+    def approve(
+        cls,
+        payload: ApplicationPayload,
+        *,
+        job_url: str,
+        acknowledged_question_keys: set[str] | None = None,
+    ) -> "ReviewApproval":
+        return cls(
+            application_id=payload.application_id,
+            job_url=normalize_job_url(job_url),
+            payload_fingerprint=payload.fingerprint(),
+            decision=True,
+            acknowledged_question_keys=frozenset(acknowledged_question_keys or set()),
+        )
+
+    def validates(self, payload: ApplicationPayload, job_url: str) -> bool:
+        return (
+            self.decision is True
+            and self.application_id == payload.application_id
+            and self.job_url == normalize_job_url(job_url)
+            and self.payload_fingerprint == payload.fingerprint()
+            and {
+                question.key for question in payload.unanswered_review_questions
+            }.issubset(self.acknowledged_question_keys)
+            and not payload.missing_profile_questions
+        )
+
 
 class SubmissionReceipt(BaseModel):
     submission_outcome: SubmissionOutcome
@@ -96,15 +140,19 @@ class FillResult(BaseModel):
 class SubmissionVerification(BaseModel):
     outcome: VerificationOutcome
     evidence: str | None = None
+    application_id: str | None = None
+    job_url: str | None = None
+    attempt_number: int | None = None
 
 
 class AdapterError(Exception):
+    """Failure with None meaning ambiguous after entering the submit boundary."""
     def __init__(
         self,
         message: str,
         *,
         retryable: bool = False,
-        submission_started: bool = False,
+        submission_started: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
@@ -122,12 +170,16 @@ class ApplicationAdapter(Protocol):
 
     def fill(self, payload: ApplicationPayload) -> FillResult: ...
 
-    def submit(self, payload: ApplicationPayload) -> SubmissionReceipt: ...
+    def submit(
+        self, payload: ApplicationPayload, *, approval: ReviewApproval | None = None
+    ) -> SubmissionReceipt: ...
 
     def verify_result(
         self,
         payload: ApplicationPayload,
         receipt: SubmissionReceipt,
+        *,
+        attempt: ApplicationAttempt,
     ) -> SubmissionVerification: ...
 
 
@@ -395,7 +447,7 @@ class ApplicationEngine:
         job: Job,
         profile: ApplicationProfile,
         *,
-        review_approved: bool = False,
+        approval: ReviewApproval | None = None,
         retry: bool = False,
         review_answers: dict[str, str] | None = None,
     ) -> ApplicationResult:
@@ -553,7 +605,22 @@ class ApplicationEngine:
                 error_message="Adapter cannot upload a requested application document.",
             )
 
-        if payload.needs_review or not review_approved:
+        approved = approval is not None and approval.validates(
+            payload, application.job_url
+        )
+        if approval is not None and not approved:
+            self.tracker.update_automation_status(
+                application.job_url, AutomationStatus.needs_review
+            )
+            return self._finish(
+                attempt,
+                AttemptOutcome.needs_review,
+                ApplicationResultStatus.needs_review,
+                payload=payload,
+                failure_category=FailureCategory.review_required,
+                error_message="Approval does not match this application payload or review questions.",
+            )
+        if not approved:
             self.tracker.update_automation_status(
                 application.job_url,
                 AutomationStatus.needs_review,
@@ -651,18 +718,31 @@ class ApplicationEngine:
                 retryable=fill_result.retryable,
             )
 
+        # Claim atomically before marking the tracker submitting or entering
+        # the adapter boundary. A competing process cannot take the same claim.
+        claimed = self.attempts.claim_submission(
+            application_id=application_id,
+            company=application.company,
+            job_title=application.job_title,
+            job_url=application.job_url,
+            platform=adapter.platform,
+            attempt=attempt,
+        )
+        if claimed is None:
+            return self._finish(
+                attempt,
+                AttemptOutcome.failed,
+                ApplicationResultStatus.duplicate_submission_blocked,
+                payload=payload,
+                error_message="A durable submission claim already exists.",
+            )
+        attempt = claimed
         self.tracker.update_automation_status(
             application.job_url,
             AutomationStatus.submitting,
         )
-        attempt = self.attempts.update(
-            attempt,
-            outcome=AttemptOutcome.submitting,
-            current_step="submit",
-            last_successful_step="fill",
-        )
         try:
-            receipt = adapter.submit(payload)
+            receipt = adapter.submit(payload, approval=approval)
             attempt = self.attempts.update(
                 attempt,
                 current_step="verify",
@@ -734,9 +814,11 @@ class ApplicationEngine:
                     submission_outcome=SubmissionOutcome.not_submitted,
                 )
 
-            verification = adapter.verify_result(payload, receipt)
+            verification = adapter.verify_result(payload, receipt, attempt=attempt)
         except AdapterError as exc:
-            return self._handle_adapter_error(attempt, application, exc, payload)
+            return self._handle_adapter_error(
+                attempt, application, exc, payload, submission_boundary_entered=True
+            )
         except Exception as exc:
             self.tracker.update_automation_status(
                 application.job_url,
@@ -753,7 +835,18 @@ class ApplicationEngine:
             )
 
         if verification.outcome == VerificationOutcome.verified:
-            if not verification.evidence or not verification.evidence.strip():
+            context_matches = (
+                verification.application_id == attempt.application_id
+                and verification.job_url is not None
+                and normalize_job_url(verification.job_url)
+                == normalize_job_url(attempt.job_url)
+                and verification.attempt_number == attempt.attempt_number
+            )
+            if (
+                not verification.evidence
+                or not verification.evidence.strip()
+                or not context_matches
+            ):
                 self.tracker.update_automation_status(
                     application.job_url,
                     AutomationStatus.unknown_submission_result,
@@ -765,7 +858,7 @@ class ApplicationEngine:
                     payload=payload,
                     failure_category=FailureCategory.verification_error,
                     error_message=(
-                        "Adapter reported success without providing verification evidence."
+                        "Adapter reported success without evidence bound to the current application attempt."
                     ),
                     submission_outcome=SubmissionOutcome.unknown,
                 )
@@ -821,8 +914,12 @@ class ApplicationEngine:
         application: Application,
         error: AdapterError,
         payload: ApplicationPayload | None = None,
+        *,
+        submission_boundary_entered: bool = False,
     ) -> ApplicationResult:
-        unknown = error.submission_started
+        unknown = error.submission_started is True or (
+            error.submission_started is None and submission_boundary_entered
+        )
         self.tracker.update_automation_status(
             application.job_url,
             AutomationStatus.unknown_submission_result if unknown else AutomationStatus.failed,

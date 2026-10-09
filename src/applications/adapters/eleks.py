@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlsplit
 
 from src.applications.adapters.base import (
@@ -22,6 +23,7 @@ from src.applications.adapters.verification import (
     VisibleConfirmationTextVerifier,
 )
 from src.applications.models import Application
+from src.applications.recovery import AttemptOutcome, AttemptStore, SubmissionOutcome as StoredSubmissionOutcome
 from src.applications.profile import ApplicationProfile
 from src.applications.submission import (
     ApplicationForm,
@@ -33,6 +35,7 @@ from src.applications.submission import (
     SubmissionReceipt,
     SubmissionVerification,
     VerificationOutcome,
+    ReviewApproval,
     application_id_for,
     map_application_questions,
 )
@@ -66,7 +69,7 @@ def _is_honeypot(field: BrowserField) -> bool:
 
 
 class EleksAdapter(ApplicationAdapter):
-    """Read-only ELEKS form adapter; submission is deliberately disabled."""
+    """ELEKS form adapter with preparation and explicitly approved submission."""
 
     platform = "eleks_gravity_forms"
 
@@ -75,6 +78,7 @@ class EleksAdapter(ApplicationAdapter):
         browser: BrowserAutomation,
         *,
         verifier: SubmissionVerifier | None = None,
+        attempt_store: AttemptStore | None = None,
     ) -> None:
         self.browser = browser
         self.verifier = verifier or VisibleConfirmationTextVerifier(
@@ -84,7 +88,7 @@ class EleksAdapter(ApplicationAdapter):
         self._preparation_statuses: dict[str, ApplicationResultStatus] = {}
         self._preparation_results: dict[str, PreparationResult] = {}
         self._verification_results: dict[str, AdapterVerificationResult] = {}
-        self._submission_attempted: set[str] = set()
+        self.attempt_store = attempt_store or AttemptStore()
 
     def can_handle(self, job: Job) -> bool:
         parsed = urlsplit(job.url)
@@ -240,7 +244,9 @@ class EleksAdapter(ApplicationAdapter):
             (
                 field
                 for field in inspection.fields
-                if field.kind.casefold() == "file" and not field.honeypot
+                if field.kind.casefold() == "file"
+                and _normalize_label(field.label) in {"attach a cv", "cv", "resume", "attach cv"}
+                and not field.honeypot
             ),
             None,
         )
@@ -348,6 +354,10 @@ class EleksAdapter(ApplicationAdapter):
         self._preparation_results[normalize_job_url(application.job_url)] = result
         return result
 
+    def preparation_result(self, application: Application) -> PreparationResult | None:
+        """Return the current preparation snapshot for the supplied application."""
+        return self._preparation_results.get(normalize_job_url(application.job_url))
+
     def _apply_prepared_values(
         self,
         inspection: InspectionResult,
@@ -414,19 +424,10 @@ class EleksAdapter(ApplicationAdapter):
         self,
         application: Application,
         *,
-        approved: bool = False,
+        approval: ReviewApproval | None = None,
+        attempt_claimed: bool = False,
     ) -> AdapterSubmissionResult:
         application_key = normalize_job_url(application.job_url)
-        if approved is not True:
-            return AdapterSubmissionResult(
-                status=ApplicationResultStatus.needs_review,
-                receipt=SubmissionReceipt(
-                    submission_outcome=SubmissionOutcome.not_started,
-                    error_message="Explicit human approval is required before submission.",
-                ),
-                message="Explicit human approval is required before submission.",
-            )
-
         preparation = self._preparation_results.get(application_key)
         if (
             preparation is None
@@ -441,17 +442,6 @@ class EleksAdapter(ApplicationAdapter):
                 ApplicationResultStatus.unsupported,
                 "A successful ELEKS preparation is required before submission.",
             )
-        if application_key in self._submission_attempted:
-            return self._not_started(
-                ApplicationResultStatus.duplicate_submission_blocked,
-                "A submission attempt already started; duplicate submission is blocked.",
-            )
-        if preparation.payload.missing_profile_questions:
-            return self._not_started(
-                ApplicationResultStatus.needs_review,
-                "Required profile fields are missing; submission remains blocked.",
-            )
-
         try:
             challenge = self.browser.detect_human_action()
         except Exception as exc:
@@ -469,8 +459,55 @@ class EleksAdapter(ApplicationAdapter):
                 ),
                 message=challenge,
             )
+        if approval is None:
+            return AdapterSubmissionResult(
+                status=ApplicationResultStatus.needs_review,
+                receipt=SubmissionReceipt(
+                    submission_outcome=SubmissionOutcome.not_started,
+                    error_message="Explicit payload-bound human approval is required before submission.",
+                ),
+                message="Explicit payload-bound human approval is required before submission.",
+            )
+        if not approval.validates(preparation.payload, application.job_url):
+            return self._not_started(
+                ApplicationResultStatus.needs_review,
+                "Approval does not match the prepared ELEKS payload and application.",
+            )
+        if preparation.payload.missing_profile_questions:
+            return self._not_started(
+                ApplicationResultStatus.needs_review,
+                "Required profile fields are missing; submission remains blocked.",
+            )
+        unresolved = {
+            question.key for question in preparation.payload.unanswered_review_questions
+        }
+        if not unresolved.issubset(approval.acknowledged_question_keys):
+            return self._not_started(
+                ApplicationResultStatus.needs_review,
+                "Unresolved application questions require explicit acknowledgement.",
+            )
 
-        self._submission_attempted.add(application_key)
+        claim = None
+        if attempt_claimed and not self.attempt_store.has_submission_in_progress(
+            preparation.payload.application_id
+        ):
+            return self._not_started(
+                ApplicationResultStatus.duplicate_submission_blocked,
+                "The engine has not persisted an active submission claim.",
+            )
+        if not attempt_claimed:
+            claim = self.attempt_store.claim_submission(
+                application_id=preparation.payload.application_id,
+                company=application.company,
+                job_title=application.job_title,
+                job_url=application.job_url,
+                platform=self.platform,
+            )
+            if claim is None:
+                return self._not_started(
+                    ApplicationResultStatus.duplicate_submission_blocked,
+                    "A persisted submission attempt already exists; duplicate submission is blocked.",
+                )
         try:
             browser_result = self.browser.submit_form(approved=True)
         except Exception as exc:
@@ -478,11 +515,11 @@ class EleksAdapter(ApplicationAdapter):
             return self._verify_started_submission(
                 application_key,
                 attempt_message=f"Browser submit outcome is ambiguous: {exc}",
+                attempt=claim,
             )
 
         if not browser_result.action_started:
             if browser_result.human_action_required:
-                self._submission_attempted.discard(application_key)
                 return AdapterSubmissionResult(
                     status=ApplicationResultStatus.human_action_required,
                     receipt=SubmissionReceipt(
@@ -494,7 +531,14 @@ class EleksAdapter(ApplicationAdapter):
                 )
             if browser_result.outcome == BrowserSubmissionOutcome.unknown:
                 return self._unknown_submission(browser_result.message)
-            self._submission_attempted.discard(application_key)
+            if claim is not None:
+                self.attempt_store.update(
+                    claim,
+                    outcome=AttemptOutcome.failed,
+                    submission_outcome=StoredSubmissionOutcome.not_submitted,
+                    retryable=False,
+                    completed_at=datetime.now(timezone.utc),
+                )
             return self._not_started(
                 ApplicationResultStatus.failed,
                 browser_result.message or "The browser did not start submission.",
@@ -503,6 +547,7 @@ class EleksAdapter(ApplicationAdapter):
         return self._verify_started_submission(
             application_key,
             attempt_message=browser_result.message,
+            attempt=claim,
         )
 
     def _verify_started_submission(
@@ -510,9 +555,16 @@ class EleksAdapter(ApplicationAdapter):
         application_key: str,
         *,
         attempt_message: str | None,
+        attempt=None,
     ) -> AdapterSubmissionResult:
         try:
-            verification = self.verifier.verify()
+            if attempt is None:
+                attempt = self.attempt_store.latest_for(
+                    self._preparation_results[application_key].payload.application_id
+                )
+            if attempt is None:
+                raise ValueError("No persisted application attempt is available for verification.")
+            verification = self.verifier.verify(attempt=attempt)
         except Exception as exc:
             verification = AdapterVerificationResult(
                 status=ApplicationResultStatus.unknown_submission_result,
@@ -524,13 +576,42 @@ class EleksAdapter(ApplicationAdapter):
             )
         self._verification_results[application_key] = verification
 
-        if verification.verification.outcome == VerificationOutcome.verified:
+        attempt_context_matches = (
+            attempt is not None
+            and verification.verification.application_id == attempt.application_id
+            and verification.verification.job_url is not None
+            and normalize_job_url(verification.verification.job_url)
+            == normalize_job_url(attempt.job_url)
+            and verification.verification.attempt_number == attempt.attempt_number
+        )
+        if (
+            verification.verification.outcome == VerificationOutcome.verified
+            and verification.verification.evidence
+            and verification.verification.evidence.strip()
+            and attempt_context_matches
+        ):
+            self.attempt_store.update(
+                attempt,
+                outcome=AttemptOutcome.submitted,
+                submission_outcome=StoredSubmissionOutcome.submitted,
+                verification_result=True,
+                verification_evidence=verification.verification.evidence,
+                completed_at=datetime.now(timezone.utc),
+            )
             return AdapterSubmissionResult(
                 status=ApplicationResultStatus.submitted,
                 receipt=SubmissionReceipt(
                     submission_outcome=SubmissionOutcome.submitted,
                 ),
                 message=verification.message,
+            )
+        if attempt is not None:
+            self.attempt_store.update(
+                attempt,
+                outcome=AttemptOutcome.unknown_submission_result,
+                submission_outcome=StoredSubmissionOutcome.unknown,
+                retryable=False,
+                completed_at=datetime.now(timezone.utc),
             )
         return self._unknown_submission(
             attempt_message or verification.message

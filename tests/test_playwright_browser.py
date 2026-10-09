@@ -74,3 +74,32 @@ def test_playwright_driver_stops_at_security_challenge(browser, tmp_path):
 
     with pytest.raises(BrowserHumanActionRequired, match="CAPTCHA"):
         browser.fill_field("full_name", "must not be entered")
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "security_login.html",
+        "security_sso.html",
+        "security_captcha.html",
+        "security_challenge.html",
+        "security_mfa.html",
+        "security_unusual.html",
+    ],
+)
+def test_local_auth_and_security_fixtures_fail_closed_before_fill(browser, fixture_name):
+    fixture = Path(__file__).parent / "fixtures" / fixture_name
+    with pytest.raises(BrowserHumanActionRequired):
+        browser.open_url(fixture.resolve().as_uri())
+    assert browser.detect_human_action()
+    with pytest.raises(BrowserHumanActionRequired):
+        browser.fill_field("email", "candidate@example.test")
+
+
+def test_playwright_inspection_marks_hidden_honeypot_controls(browser):
+    fixture = Path(__file__).parent / "fixtures" / "honeypot_form.html"
+    browser.open_url(fixture.resolve().as_uri())
+    fields = {field.key: field for field in browser.inspect_page().fields}
+    assert fields["full_name"].honeypot is False
+    assert fields["website"].honeypot is True
+    assert fields["hp_field"].honeypot is True
