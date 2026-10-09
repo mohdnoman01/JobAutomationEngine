@@ -7,6 +7,13 @@ from src.applications.models import (
     ApplicationStatus,
     AutomationStatus,
 )
+from src.applications.evidence import (
+    BrowserObservation,
+    EvidenceObserver,
+    VerifiedSubmissionEvidence,
+)
+from src.applications.identity import application_id_for
+from src.applications.recovery import AttemptOutcome, AttemptStore
 from src.applications.tracker import (
     ApplicationTracker,
     load_applications,
@@ -15,6 +22,40 @@ from src.applications.tracker import (
     save_contacts,
 )
 from src.research.models import Contact, ContactQualification
+
+
+def _fixture_verified_evidence(attempts, job_url, *, evidence="Local fixture confirmation"):
+    application_id = application_id_for(job_url)
+    attempt = attempts.claim_submission(
+        application_id=application_id,
+        company="Test Startup",
+        job_title="Android Developer",
+        job_url=job_url,
+        platform="local_fixture",
+        payload_fingerprint="fixture-payload-fingerprint",
+    )
+    observation = BrowserObservation(
+        observer=EvidenceObserver.test_fixture,
+        observation_id="fixture-observation-1",
+        observed_url="file:///local/confirmation.html",
+        application_id=application_id,
+        job_url=job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+        action_started=True,
+        page_changed_after_action=True,
+    )
+    verified = VerifiedSubmissionEvidence(
+        mechanism="local_fixture",
+        evidence=evidence,
+        application_id=application_id,
+        job_url=job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+        trusted_confirmation_url=observation.observed_url,
+        observation=observation,
+    )
+    return verified, attempt
 
 
 def test_application_persistence(tmp_path):
@@ -121,10 +162,16 @@ def test_application_tracker_updates_status(tmp_path):
         AutomationStatus.submitting,
     )
 
+    attempts = AttemptStore(path.with_name("attempts.json"))
+    verified_evidence, attempt = _fixture_verified_evidence(
+        attempts, "https://example.com/android"
+    )
     updated = tracker.mark_submitted(
         "https://example.com/android",
         applied_date=date(2026, 8, 24),
-        submission_evidence="Recorded submission confirmation",
+        verified_evidence=verified_evidence,
+        attempt=attempt,
+        attempts=attempts,
     )
 
     assert updated.status == ApplicationStatus.applied
@@ -213,9 +260,15 @@ def test_application_tracker_allows_valid_transitions(
             "https://example.com/android",
             AutomationStatus.submitting,
         )
+        attempts = AttemptStore(path.with_name("attempts.json"))
+        verified_evidence, attempt = _fixture_verified_evidence(
+            attempts, "https://example.com/android"
+        )
         updated = tracker.mark_submitted(
             "https://example.com/android",
-            submission_evidence="Test submission confirmation",
+            verified_evidence=verified_evidence,
+            attempt=attempt,
+            attempts=attempts,
         )
     else:
         updated = tracker.update_status(
@@ -327,6 +380,68 @@ def test_application_tracker_requires_evidence_to_mark_applied(tmp_path):
             "https://example.com/android",
             ApplicationStatus.applied,
         )
+
+
+@pytest.mark.parametrize("mutation", ["other_application", "other_job", "old_attempt", "empty_evidence"])
+def test_tracker_rejects_unbound_or_empty_verified_evidence(tmp_path, mutation):
+    path = tmp_path / "applications.json"
+    job_url = "https://example.com/android"
+    tracker = ApplicationTracker(path)
+    tracker.create("Test Startup", "Android Developer", job_url)
+    tracker.update_status(job_url, ApplicationStatus.ready)
+    tracker.update_automation_status(job_url, AutomationStatus.preparing)
+    tracker.update_automation_status(job_url, AutomationStatus.ready_to_submit)
+    tracker.update_automation_status(job_url, AutomationStatus.submitting)
+    attempts = AttemptStore(path.with_name("attempts.json"))
+    evidence, attempt = _fixture_verified_evidence(attempts, job_url)
+    if mutation == "other_application":
+        evidence = evidence.model_copy(update={"application_id": "other-application"})
+    elif mutation == "other_job":
+        evidence = evidence.model_copy(update={"job_url": "https://example.com/other"})
+    elif mutation == "old_attempt":
+        evidence = evidence.model_copy(update={"attempt_number": attempt.attempt_number + 1})
+    else:
+        evidence = evidence.model_copy(update={"evidence": "  "})
+
+    with pytest.raises(ValueError):
+        tracker.mark_submitted(
+            job_url, verified_evidence=evidence, attempt=attempt, attempts=attempts
+        )
+    assert tracker.get(job_url).status == ApplicationStatus.ready
+
+
+def test_tracker_does_not_accept_arbitrary_string_as_verified_evidence(tmp_path):
+    tracker = ApplicationTracker(tmp_path / "applications.json")
+    job_url = "https://example.com/android"
+    tracker.create("Test Startup", "Android Developer", job_url)
+    with pytest.raises((TypeError, ValueError)):
+        tracker.mark_submitted(job_url, verified_evidence="confirmation")
+
+
+def test_completed_claim_cannot_authorize_a_replayed_browser_action(tmp_path):
+    job_url = "https://example.com/android"
+    attempts = AttemptStore(tmp_path / "attempts.json")
+    evidence, attempt = _fixture_verified_evidence(attempts, job_url)
+    attempts.update(
+        attempt,
+        outcome=AttemptOutcome.submitted,
+        verification_result=True,
+        verification_evidence=evidence.evidence,
+    )
+
+    assert not attempts.matches_submission_claim(
+        application_id=attempt.application_id,
+        job_url=job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+    )
+    assert attempts.matches_submission_claim(
+        application_id=attempt.application_id,
+        job_url=job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+        allow_completed_verified=True,
+    )
 
 
 def test_application_tracker_normalizes_legacy_url_on_lookup(tmp_path):

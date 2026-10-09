@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+from src.research.job_normalizer import normalize_job_url
 
 try:
     import msvcrt
@@ -65,6 +66,8 @@ class ApplicationAttempt(BaseModel):
     job_url: str
     platform: str
     attempt_number: int
+    payload_fingerprint: str | None = None
+    browser_action_started: bool = False
     started_at: datetime
     completed_at: datetime | None = None
     current_step: str = "start"
@@ -106,6 +109,62 @@ class AttemptStore:
             for attempt in self.list()
         )
 
+    def matches_submission_claim(
+        self,
+        *,
+        application_id: str,
+        job_url: str,
+        attempt_number: int,
+        payload_fingerprint: str,
+        allow_completed_verified: bool = False,
+    ) -> bool:
+        """Check the exact live persisted claim required by a browser submit."""
+        with self._locked():
+            return any(
+                item.application_id == application_id
+                and normalize_job_url(item.job_url) == normalize_job_url(job_url)
+                and item.attempt_number == attempt_number
+                and (
+                    item.outcome == AttemptOutcome.submitting
+                    or (
+                        allow_completed_verified
+                        and item.outcome == AttemptOutcome.submitted
+                        and item.verification_result is True
+                        and bool(item.verification_evidence)
+                    )
+                )
+                and item.payload_fingerprint == payload_fingerprint
+                for item in self.list()
+            )
+
+    def begin_browser_submission_action(
+        self,
+        *,
+        application_id: str,
+        job_url: str,
+        attempt_number: int,
+        payload_fingerprint: str,
+    ) -> bool:
+        """Atomically consume the active claim before the irreversible browser action."""
+        with self._locked():
+            attempts = self.list()
+            for index, item in enumerate(attempts):
+                if (
+                    item.application_id != application_id
+                    or normalize_job_url(item.job_url) != normalize_job_url(job_url)
+                    or item.attempt_number != attempt_number
+                    or item.payload_fingerprint != payload_fingerprint
+                    or item.outcome != AttemptOutcome.submitting
+                    or item.browser_action_started
+                ):
+                    continue
+                attempts[index] = item.model_copy(
+                    update={"browser_action_started": True}
+                )
+                self._save(attempts)
+                return True
+            return False
+
     def start(
         self,
         *,
@@ -146,6 +205,7 @@ class AttemptStore:
         job_url: str,
         platform: str,
         attempt: ApplicationAttempt | None = None,
+        payload_fingerprint: str | None = None,
     ) -> ApplicationAttempt | None:
         """Persist a one-use submit claim under a process-shared file lock.
 
@@ -175,6 +235,7 @@ class AttemptStore:
                         "outcome": AttemptOutcome.submitting,
                         "submission_outcome": SubmissionOutcome.unknown,
                         "retryable": False,
+                        "payload_fingerprint": payload_fingerprint or attempt.payload_fingerprint,
                     }
                 )
                 for index, existing in enumerate(attempts):
@@ -198,6 +259,7 @@ class AttemptStore:
                     current_step="submit",
                     outcome=AttemptOutcome.submitting,
                     submission_outcome=SubmissionOutcome.unknown,
+                    payload_fingerprint=payload_fingerprint,
                 )
                 attempts.append(claimed)
             self._save(attempts)

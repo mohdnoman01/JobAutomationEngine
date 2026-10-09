@@ -17,13 +17,15 @@ from src.applications.adapters.eleks import ELEKS_HOST, EleksAdapter
 from src.applications.adapters.verification import VisibleConfirmationTextVerifier
 from src.applications.models import Application
 from src.applications.profile import ApplicationProfile
-from src.applications.submission import ApplicationResultStatus, VerificationOutcome, application_id_for
+from src.applications.submission import ApplicationResultStatus, VerificationOutcome
 from src.applications.submission import ReviewApproval
 from src.applications.recovery import AttemptStore
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "browser_driver.html"
 SUBMISSION_FIXTURE = Path(__file__).parent / "fixtures" / "eleks_submission.html"
+CONFIRMATION_FIXTURE = Path(__file__).parent / "fixtures" / "verification_confirmation.html"
+CONFIRMATION_URL = CONFIRMATION_FIXTURE.resolve().as_uri()
 NO_CONFIRMATION_FIXTURE = (
     Path(__file__).parent / "fixtures" / "eleks_submission_no_confirmation.html"
 )
@@ -54,7 +56,6 @@ class LocalEleksBrowser:
         self.checkboxes: list[tuple[str, bool]] = []
         self.clicked: list[str] = []
         self.submit_calls = 0
-        self.attempt_store = None
 
     def open_url(self, url: str) -> None:
         self.requested_urls.append(url)
@@ -85,24 +86,13 @@ class LocalEleksBrowser:
     def detect_human_action(self) -> str | None:
         return self.driver.detect_human_action()
 
-    def submit_form(self, *, approved: bool) -> BrowserSubmissionResult:
-        if approved:
+    def submit_form(self, *, authorization=None) -> BrowserSubmissionResult:
+        if authorization is not None:
             self.submit_calls += 1
-        return self.driver.submit_form(approved=approved)
+        return self.driver.submit_form(authorization=authorization)
 
     def inspect_result(self) -> BrowserPageSnapshot:
-        page = self.driver.inspect_result()
-        if self.attempt_store is None:
-            return page
-        attempt = self.attempt_store.latest_for(application_id_for(ELEKS_URL))
-        if attempt is None or CONFIRMATION_MARKER not in page.body_text:
-            return page
-        # Deterministic fixture-only context; this is not asserted to exist on ELEKS.
-        return page.model_copy(update={
-            "confirmation_application_id": attempt.application_id,
-            "confirmation_job_url": attempt.job_url,
-            "confirmation_attempt_number": attempt.attempt_number,
-        })
+        return self.driver.inspect_result()
 
 
 @pytest.fixture
@@ -235,7 +225,6 @@ def _prepare_submission_adapter(browser, tmp_path, *, verifier=None):
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"local resume fixture")
     attempt_store = AttemptStore(tmp_path / "attempts.json")
-    browser.attempt_store = attempt_store
     adapter = EleksAdapter(
         browser,
         verifier=verifier,
@@ -270,6 +259,7 @@ def test_submission_requires_explicit_approval_then_verifies_local_confirmation(
     verifier = VisibleConfirmationTextVerifier(
         browser,
         confirmation_marker=CONFIRMATION_MARKER,
+        trusted_confirmation_urls={CONFIRMATION_URL},
     )
     adapter = _prepare_submission_adapter(browser, tmp_path, verifier=verifier)
 
@@ -343,10 +333,11 @@ def test_eleks_duplicate_is_blocked_after_adapter_recreation_and_state_reload(dr
     attempts_path = tmp_path / "durable-attempts.json"
     browser = LocalEleksBrowser(driver, SUBMISSION_FIXTURE.resolve().as_uri())
     verifier = VisibleConfirmationTextVerifier(
-        browser, confirmation_marker=CONFIRMATION_MARKER
+        browser,
+        confirmation_marker=CONFIRMATION_MARKER,
+        trusted_confirmation_urls={CONFIRMATION_URL},
     )
     first = EleksAdapter(browser, verifier=verifier, attempt_store=AttemptStore(attempts_path))
-    browser.attempt_store = first.attempt_store
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"local resume fixture")
     profile = ApplicationProfile(
@@ -371,8 +362,8 @@ def test_eleks_duplicate_is_blocked_after_adapter_recreation_and_state_reload(dr
 
 def test_ambiguous_browser_failure_after_click_remains_unknown(driver, tmp_path):
     class AmbiguousBrowser(LocalEleksBrowser):
-        def submit_form(self, *, approved: bool) -> BrowserSubmissionResult:
-            super().submit_form(approved=approved)
+        def submit_form(self, *, authorization=None) -> BrowserSubmissionResult:
+            super().submit_form(authorization=authorization)
             return BrowserSubmissionResult(
                 outcome=BrowserSubmissionOutcome.unknown,
                 message="Browser timed out after dispatch.",
@@ -420,6 +411,7 @@ def test_security_challenge_after_submit_is_unknown(driver, tmp_path):
         verifier=VisibleConfirmationTextVerifier(
             browser,
             confirmation_marker=CONFIRMATION_MARKER,
+            trusted_confirmation_urls={CONFIRMATION_URL},
         ),
     )
 

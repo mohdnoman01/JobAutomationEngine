@@ -5,6 +5,12 @@ from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, Field
+from uuid import uuid4
+
+from src.applications.evidence import BrowserObservation, EvidenceObserver
+from src.applications.recovery import ApplicationAttempt, AttemptStore, AttemptOutcome
+from src.applications.submission import ApplicationPayload, ReviewApproval
+from src.research.job_normalizer import normalize_job_url
 
 
 class BrowserField(BaseModel):
@@ -35,9 +41,7 @@ class BrowserPageSnapshot(BaseModel):
     controls: list[BrowserControl] = Field(default_factory=list)
     # A driver must surface challenges as state, never attempt to solve them.
     human_action_required: str | None = None
-    confirmation_application_id: str | None = None
-    confirmation_job_url: str | None = None
-    confirmation_attempt_number: int | None = None
+    observation: BrowserObservation | None = None
 
 
 class BrowserInteractionError(RuntimeError):
@@ -63,6 +67,56 @@ class BrowserSubmissionResult(BaseModel):
     human_action_required: bool = False
 
 
+class BrowserSubmissionAuthorization(BaseModel):
+    """Validated approval and persisted claim for one exact payload attempt."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    approval: ReviewApproval
+    payload: ApplicationPayload
+    attempt: ApplicationAttempt
+    attempt_store: AttemptStore = Field(exclude=True)
+
+    def failure_reason(self) -> str | None:
+        if not self.approval.validates(self.payload, self.payload.job_url):
+            return "Payload-bound approval is invalid or stale."
+        if (
+            self.payload.application_id != self.attempt.application_id
+            or normalize_job_url(self.payload.job_url)
+            != normalize_job_url(self.attempt.job_url)
+            or self.attempt.outcome != AttemptOutcome.submitting
+        ):
+            return "Authorization does not match the active application attempt."
+        if not self.attempt.payload_fingerprint or (
+            self.attempt.payload_fingerprint != self.payload.fingerprint()
+        ):
+            return "Persistent claim does not bind the approved payload fingerprint."
+        if not self.attempt_store.matches_submission_claim(
+            application_id=self.attempt.application_id,
+            job_url=self.attempt.job_url,
+            attempt_number=self.attempt.attempt_number,
+            payload_fingerprint=self.payload.fingerprint(),
+        ):
+            return "A matching persistent submission claim is required."
+        if self.attempt.browser_action_started:
+            return "The persistent submission claim has already been consumed."
+        return None
+
+    def begin_browser_action(self) -> str | None:
+        """Consume this authorization exactly once immediately before clicking."""
+        failure = self.failure_reason()
+        if failure:
+            return failure
+        if not self.attempt_store.begin_browser_submission_action(
+            application_id=self.attempt.application_id,
+            job_url=self.attempt.job_url,
+            attempt_number=self.attempt.attempt_number,
+            payload_fingerprint=self.payload.fingerprint(),
+        ):
+            return "The persistent submission claim is missing or already consumed."
+        return None
+
+
 class BrowserAutomation(Protocol):
     def open_url(self, url: str) -> None: ...
 
@@ -80,7 +134,9 @@ class BrowserAutomation(Protocol):
 
     def detect_human_action(self) -> str | None: ...
 
-    def submit_form(self, *, approved: bool) -> BrowserSubmissionResult: ...
+    def submit_form(
+        self, *, authorization: BrowserSubmissionAuthorization | None = None
+    ) -> BrowserSubmissionResult: ...
 
     def inspect_result(self) -> BrowserPageSnapshot: ...
 
@@ -101,6 +157,7 @@ class PlaywrightBrowser:
             self._browser = self._playwright.chromium.launch(headless=headless)
             self._context = self._browser.new_context()
             self._page = self._context.new_page()
+            self._submission_observation: BrowserObservation | None = None
         except Exception as exc:
             self._playwright.stop()
             raise BrowserInteractionError(
@@ -121,6 +178,7 @@ class PlaywrightBrowser:
 
     def open_url(self, url: str) -> None:
         self._guard("open_url")
+        self._submission_observation = None
         try:
             self._page.goto(url, wait_until="domcontentloaded")
         except Exception as exc:
@@ -162,24 +220,6 @@ class PlaywrightBrowser:
             form_action = form.get_attribute("action") if form_found else None
             form_method = form.get_attribute("method") if form_found else None
             form_enctype = form.get_attribute("enctype") if form_found else None
-            confirmation_context = self._page.locator(
-                "[data-submission-context]"
-            ).first
-            confirmation_application_id = (
-                confirmation_context.get_attribute("data-application-id")
-                if confirmation_context.count()
-                else None
-            )
-            confirmation_job_url = (
-                confirmation_context.get_attribute("data-job-url")
-                if confirmation_context.count()
-                else None
-            )
-            confirmation_attempt = (
-                confirmation_context.get_attribute("data-attempt-number")
-                if confirmation_context.count()
-                else None
-            )
             return BrowserPageSnapshot(
                 url=self._page.url,
                 title=self._page.title(),
@@ -191,11 +231,7 @@ class PlaywrightBrowser:
                 fields=fields,
                 controls=controls,
                 human_action_required=challenge,
-                confirmation_application_id=confirmation_application_id,
-                confirmation_job_url=confirmation_job_url,
-                confirmation_attempt_number=(
-                    int(confirmation_attempt) if confirmation_attempt else None
-                ),
+                observation=self._submission_observation,
             )
         except BrowserInteractionError:
             raise
@@ -303,11 +339,19 @@ class PlaywrightBrowser:
         except Exception as exc:
             raise BrowserInteractionError(f"Browser challenge inspection failed: {exc}") from exc
 
-    def submit_form(self, *, approved: bool) -> BrowserSubmissionResult:
-        if approved is not True:
+    def submit_form(
+        self, *, authorization: BrowserSubmissionAuthorization | None = None
+    ) -> BrowserSubmissionResult:
+        if authorization is None:
             return BrowserSubmissionResult(
                 outcome=BrowserSubmissionOutcome.not_started,
-                message="Explicit approval is required before browser submission.",
+                message="Validated approval and persistent claim are required before browser submission.",
+            )
+        failure_reason = authorization.failure_reason()
+        if failure_reason:
+            return BrowserSubmissionResult(
+                outcome=BrowserSubmissionOutcome.not_started,
+                message=failure_reason,
             )
 
         challenge = self.detect_human_action()
@@ -319,6 +363,8 @@ class PlaywrightBrowser:
             )
 
         try:
+            before_url = self._page.url
+            before_body = self._page.locator("body").inner_text()
             submitter = self._page.locator(
                 'form button[type="submit"], form input[type="submit"], '
                 'form button:not([type])'
@@ -334,16 +380,30 @@ class PlaywrightBrowser:
                 f"Browser submit control inspection failed: {exc}"
             ) from exc
 
+        failure_reason = authorization.begin_browser_action()
+        if failure_reason:
+            return BrowserSubmissionResult(
+                outcome=BrowserSubmissionOutcome.not_started,
+                message=failure_reason,
+            )
+
         # Once click begins the request may reach the server even if Playwright
         # times out or the page changes. Treat every such failure as ambiguous.
         try:
             submitter.click()
         except Exception as exc:
+            self._record_submission_observation(
+                authorization, before_url=before_url, before_body=before_body
+            )
             return BrowserSubmissionResult(
                 outcome=BrowserSubmissionOutcome.unknown,
                 message=f"Submit action may have started but did not complete cleanly: {exc}",
                 action_started=True,
             )
+
+        self._record_submission_observation(
+            authorization, before_url=before_url, before_body=before_body
+        )
 
         try:
             challenge = self.detect_human_action()
@@ -368,6 +428,32 @@ class PlaywrightBrowser:
 
     def inspect_result(self) -> BrowserPageSnapshot:
         return self.inspect_page()
+
+    def _record_submission_observation(
+        self,
+        authorization: BrowserSubmissionAuthorization,
+        *,
+        before_url: str,
+        before_body: str,
+    ) -> None:
+        try:
+            observed_url = self._page.url
+            after_body = self._page.locator("body").inner_text()
+        except Exception:
+            return
+        self._submission_observation = BrowserObservation(
+            observer=EvidenceObserver.playwright_browser,
+            observation_id=str(uuid4()),
+            observed_url=observed_url,
+            application_id=authorization.attempt.application_id,
+            job_url=authorization.attempt.job_url,
+            attempt_number=authorization.attempt.attempt_number,
+            payload_fingerprint=authorization.payload.fingerprint(),
+            action_started=True,
+            page_changed_after_action=(
+                observed_url != before_url or after_body != before_body
+            ),
+        )
 
     def _field_locator(self, key: str):
         locator = self._page.locator(
@@ -406,8 +492,10 @@ class InMemoryBrowser:
         *,
         challenge: str | None = None,
         failures: dict[str, str] | None = None,
+        result_page: BrowserPageSnapshot | None = None,
     ) -> None:
         self.page = page
+        self.result_page = result_page
         self.challenge = challenge
         self.failures = dict(failures or {})
         self.operations: list[tuple[str, tuple[str, ...]]] = []
@@ -427,6 +515,7 @@ class InMemoryBrowser:
 
     def open_url(self, url: str) -> None:
         self._record("open_url", url)
+        self.page = self.page.model_copy(update={"url": url, "observation": None})
 
     def inspect_page(self) -> BrowserPageSnapshot:
         self._record("inspect_page")
@@ -463,12 +552,21 @@ class InMemoryBrowser:
         self.operations.append(("detect_human_action", ()))
         return self.challenge or self.page.human_action_required
 
-    def submit_form(self, *, approved: bool) -> BrowserSubmissionResult:
-        if approved is not True:
-            self.operations.append(("submit_blocked", ()))
+    def submit_form(
+        self, *, authorization: BrowserSubmissionAuthorization | None = None
+    ) -> BrowserSubmissionResult:
+        if authorization is None:
+            self.operations.append(("submit_blocked", ("missing_authorization",)))
             return BrowserSubmissionResult(
                 outcome=BrowserSubmissionOutcome.not_started,
-                message="Explicit approval is required before browser submission.",
+                message="Validated approval and persistent claim are required before browser submission.",
+            )
+        failure_reason = authorization.failure_reason()
+        if failure_reason:
+            self.operations.append(("submit_blocked", (failure_reason,)))
+            return BrowserSubmissionResult(
+                outcome=BrowserSubmissionOutcome.not_started,
+                message=failure_reason,
             )
         self.operations.append(("submit_form", ()))
         if self.challenge or self.page.human_action_required:
@@ -477,17 +575,58 @@ class InMemoryBrowser:
                 message=self.challenge or self.page.human_action_required,
                 human_action_required=True,
             )
+        failure_reason = authorization.begin_browser_action()
+        if failure_reason:
+            self.operations.append(("submit_blocked", (failure_reason,)))
+            return BrowserSubmissionResult(
+                outcome=BrowserSubmissionOutcome.not_started,
+                message=failure_reason,
+            )
         self.submit_calls += 1
+        before_url, before_body = self.page.url, self.page.body_text
         if "submit_form" in self.failures:
+            self._record_observation(
+                authorization,
+                before_url=before_url,
+                before_body=before_body,
+            )
             return BrowserSubmissionResult(
                 outcome=BrowserSubmissionOutcome.unknown,
                 message=self.failures["submit_form"],
                 action_started=True,
             )
+        if self.result_page is not None:
+            self.page = self.result_page.model_copy(deep=True)
+        self._record_observation(
+            authorization,
+            before_url=before_url,
+            before_body=before_body,
+        )
         return BrowserSubmissionResult(
             outcome=BrowserSubmissionOutcome.submitted,
             message="In-memory submit action recorded.",
             action_started=True,
+        )
+
+    def _record_observation(
+        self,
+        authorization: BrowserSubmissionAuthorization,
+        *,
+        before_url: str,
+        before_body: str,
+    ) -> None:
+        self.page.observation = BrowserObservation(
+            observer=EvidenceObserver.test_fixture,
+            observation_id=str(uuid4()),
+            observed_url=self.page.url,
+            application_id=authorization.attempt.application_id,
+            job_url=authorization.attempt.job_url,
+            attempt_number=authorization.attempt.attempt_number,
+            payload_fingerprint=authorization.payload.fingerprint(),
+            action_started=True,
+            page_changed_after_action=(
+                self.page.url != before_url or self.page.body_text != before_body
+            ),
         )
 
     def inspect_result(self) -> BrowserPageSnapshot:

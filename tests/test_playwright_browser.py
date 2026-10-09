@@ -49,7 +49,9 @@ def test_playwright_driver_local_fixture_flow(browser, tmp_path):
     result = browser.inspect_result()
     assert result.url.startswith("file:")
     assert "Local fixture received" in result.body_text
-    assert browser.submit_form(approved=False).outcome == BrowserSubmissionOutcome.not_started
+    assert browser.submit_form().outcome == BrowserSubmissionOutcome.not_started
+    with pytest.raises(TypeError):
+        browser.submit_form(approved=True)
 
     with pytest.raises(BrowserInteractionError, match="submit controls are disabled"):
         browser.click_safe_control("#native-submit")

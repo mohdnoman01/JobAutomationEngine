@@ -16,6 +16,7 @@ from src.applications.adapters.browser import (
     BrowserField,
     BrowserHumanActionRequired,
     BrowserPageSnapshot,
+    BrowserSubmissionAuthorization,
     BrowserSubmissionOutcome,
 )
 from src.applications.adapters.verification import (
@@ -426,6 +427,8 @@ class EleksAdapter(ApplicationAdapter):
         *,
         approval: ReviewApproval | None = None,
         attempt_claimed: bool = False,
+        authorization_payload: ApplicationPayload | None = None,
+        authorization_approval: ReviewApproval | None = None,
     ) -> AdapterSubmissionResult:
         application_key = normalize_job_url(application.job_url)
         preparation = self._preparation_results.get(application_key)
@@ -473,6 +476,14 @@ class EleksAdapter(ApplicationAdapter):
                 ApplicationResultStatus.needs_review,
                 "Approval does not match the prepared ELEKS payload and application.",
             )
+
+        authorized_payload = authorization_payload or preparation.payload
+        authorized_approval = authorization_approval or approval
+        if not authorized_approval.validates(authorized_payload, application.job_url):
+            return self._not_started(
+                ApplicationResultStatus.needs_review,
+                "Browser authorization does not match the approved payload.",
+            )
         if preparation.payload.missing_profile_questions:
             return self._not_started(
                 ApplicationResultStatus.needs_review,
@@ -495,6 +506,16 @@ class EleksAdapter(ApplicationAdapter):
                 ApplicationResultStatus.duplicate_submission_blocked,
                 "The engine has not persisted an active submission claim.",
             )
+        if attempt_claimed:
+            claim = self.attempt_store.latest_for(preparation.payload.application_id)
+            if (
+                claim is None
+                or claim.payload_fingerprint != authorized_payload.fingerprint()
+            ):
+                return self._not_started(
+                    ApplicationResultStatus.duplicate_submission_blocked,
+                    "The persistent claim does not match the authorized payload.",
+                )
         if not attempt_claimed:
             claim = self.attempt_store.claim_submission(
                 application_id=preparation.payload.application_id,
@@ -502,6 +523,7 @@ class EleksAdapter(ApplicationAdapter):
                 job_title=application.job_title,
                 job_url=application.job_url,
                 platform=self.platform,
+                payload_fingerprint=authorized_payload.fingerprint(),
             )
             if claim is None:
                 return self._not_started(
@@ -509,7 +531,14 @@ class EleksAdapter(ApplicationAdapter):
                     "A persisted submission attempt already exists; duplicate submission is blocked.",
                 )
         try:
-            browser_result = self.browser.submit_form(approved=True)
+            browser_result = self.browser.submit_form(
+                authorization=BrowserSubmissionAuthorization(
+                    approval=authorized_approval,
+                    payload=authorized_payload,
+                    attempt=claim,
+                    attempt_store=self.attempt_store,
+                )
+            )
         except Exception as exc:
             # A port exception does not prove that the browser action never began.
             return self._verify_started_submission(
@@ -583,6 +612,13 @@ class EleksAdapter(ApplicationAdapter):
             and normalize_job_url(verification.verification.job_url)
             == normalize_job_url(attempt.job_url)
             and verification.verification.attempt_number == attempt.attempt_number
+            and verification.verification.verified_evidence is not None
+            and verification.verification.verified_evidence.validates_for(
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
+                payload_fingerprint=attempt.payload_fingerprint or "",
+            )
         )
         if (
             verification.verification.outcome == VerificationOutcome.verified

@@ -4,6 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from src.applications.models import Application, ApplicationStatus, AutomationStatus
+from src.applications.evidence import (
+    BrowserObservation,
+    EvidenceObserver,
+    VerifiedSubmissionEvidence,
+)
 from src.applications.profile import ApplicationProfile, EducationEntry
 from src.applications.recovery import (
     ApplicationAttempt,
@@ -94,11 +99,32 @@ class FakeAdapter:
 
     def verify_result(self, payload, receipt, *, attempt):
         if self.fixture_verification:
+            observation = BrowserObservation(
+                observer=EvidenceObserver.test_fixture,
+                observation_id=f"test-{attempt.application_id}-{attempt.attempt_number}",
+                observed_url="fixture://confirmation",
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
+                payload_fingerprint=attempt.payload_fingerprint,
+                action_started=True,
+                page_changed_after_action=True,
+            )
             return self.verification.model_copy(
                 update={
                     "application_id": attempt.application_id,
                     "job_url": attempt.job_url,
                     "attempt_number": attempt.attempt_number,
+                    "verified_evidence": VerifiedSubmissionEvidence(
+                        mechanism="test_fixture",
+                        evidence=self.verification.evidence,
+                        application_id=attempt.application_id,
+                        job_url=attempt.job_url,
+                        attempt_number=attempt.attempt_number,
+                        payload_fingerprint=attempt.payload_fingerprint,
+                        trusted_confirmation_url="fixture://confirmation",
+                        observation=observation,
+                    ),
                 }
             )
         return self.verification

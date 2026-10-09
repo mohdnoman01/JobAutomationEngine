@@ -14,6 +14,9 @@ from src.applications.models import (
     ApplicationStatus,
     AutomationStatus,
 )
+from src.applications.evidence import VerifiedSubmissionEvidence
+from src.applications.identity import application_id_for
+from src.applications.recovery import ApplicationAttempt, AttemptStore
 from src.research.job_normalizer import normalize_job_url
 
 
@@ -188,13 +191,32 @@ class ApplicationTracker:
         self,
         job_url: str,
         *,
-        submission_evidence: str,
+        verified_evidence: VerifiedSubmissionEvidence,
+        attempt: ApplicationAttempt,
+        attempts: AttemptStore,
         applied_date: date | None = None,
     ) -> Application:
-        if not submission_evidence.strip():
-            raise ValueError("Submission evidence must not be empty")
-
         normalized_job_url = normalize_job_url(job_url)
+        expected_application_id = application_id_for(normalized_job_url)
+        if not verified_evidence.validates_for(
+            application_id=expected_application_id,
+            job_url=normalized_job_url,
+            attempt_number=attempt.attempt_number,
+            payload_fingerprint=attempt.payload_fingerprint or "",
+        ):
+            raise ValueError("Verified submission evidence is not bound to this attempt")
+        if (
+            attempt.application_id != expected_application_id
+            or normalize_job_url(attempt.job_url) != normalized_job_url
+            or not attempts.matches_submission_claim(
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
+                payload_fingerprint=attempt.payload_fingerprint or "",
+                allow_completed_verified=True,
+            )
+        ):
+            raise ValueError("A matching persistent submission claim is required")
         applications = self.list()
 
         for application in applications:
@@ -210,7 +232,7 @@ class ApplicationTracker:
             if application.status == ApplicationStatus.ready:
                 application.transition_to(
                     ApplicationStatus.applied,
-                    submission_evidence=submission_evidence,
+                    submission_evidence=verified_evidence.evidence,
                 )
             elif application.status != ApplicationStatus.applied:
                 raise ValueError(

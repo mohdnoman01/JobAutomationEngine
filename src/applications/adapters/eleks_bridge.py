@@ -139,6 +139,8 @@ class EleksEngineBridge(ApplicationAdapter):
             self._application,
             approval=platform_approval,
             attempt_claimed=True,
+            authorization_payload=payload,
+            authorization_approval=approval,
         )
         if result.receipt is None:
             raise AdapterError(result.message or "ELEKS submission returned no receipt.")
@@ -164,6 +166,13 @@ class EleksEngineBridge(ApplicationAdapter):
             or verification.job_url is None
             or normalize_job_url(verification.job_url) != normalize_job_url(attempt.job_url)
             or verification.attempt_number != attempt.attempt_number
+            or verification.verified_evidence is None
+            or not verification.verified_evidence.validates_for(
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
+                payload_fingerprint=attempt.payload_fingerprint or "",
+            )
         ):
             return SubmissionVerification(
                 outcome=VerificationOutcome.unknown,

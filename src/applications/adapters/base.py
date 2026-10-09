@@ -5,6 +5,7 @@ from typing import Protocol
 from pydantic import BaseModel, Field
 
 from src.applications.models import Application
+from src.applications.evidence import BrowserObservation
 from src.applications.profile import ApplicationProfile
 from src.applications.submission import (
     ApplicationForm,
@@ -51,6 +52,7 @@ class SubmissionEvidence(BaseModel):
     application_id: str | None = None
     job_url: str | None = None
     attempt_number: int | None = None
+    provenance: BrowserObservation | None = None
 
 
 class AdapterSubmissionResult(BaseModel):

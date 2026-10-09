@@ -108,7 +108,7 @@ class FakeBrowser:
     def detect_human_action(self):
         return self.challenge
 
-    def submit_form(self, *, approved):
+    def submit_form(self, *, authorization=None):
         if approved:
             self.submit_calls += 1
         raise AssertionError("ELEKS adapter must never submit")

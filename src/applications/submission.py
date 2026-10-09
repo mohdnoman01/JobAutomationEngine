@@ -11,6 +11,8 @@ from typing import Protocol
 from pydantic import BaseModel, Field
 
 from src.applications.models import Application, AutomationStatus
+from src.applications.evidence import VerifiedSubmissionEvidence
+from src.applications.identity import application_id_for
 from src.applications.profile import ApplicationProfile
 from src.applications.recovery import (
     ApplicationAttempt,
@@ -143,6 +145,7 @@ class SubmissionVerification(BaseModel):
     application_id: str | None = None
     job_url: str | None = None
     attempt_number: int | None = None
+    verified_evidence: VerifiedSubmissionEvidence | None = None
 
 
 class AdapterError(Exception):
@@ -221,10 +224,6 @@ CONFIGURED_FIELD_ALIASES = {
 
 def _normalize_question(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
-
-
-def application_id_for(job_url: str) -> str:
-    return sha256(normalize_job_url(job_url).encode("utf-8")).hexdigest()
 
 
 def _experience_text(profile: ApplicationProfile) -> str | None:
@@ -727,6 +726,7 @@ class ApplicationEngine:
             job_url=application.job_url,
             platform=adapter.platform,
             attempt=attempt,
+            payload_fingerprint=payload.fingerprint(),
         )
         if claimed is None:
             return self._finish(
@@ -835,6 +835,7 @@ class ApplicationEngine:
             )
 
         if verification.outcome == VerificationOutcome.verified:
+            verified_evidence = verification.verified_evidence
             context_matches = (
                 verification.application_id == attempt.application_id
                 and verification.job_url is not None
@@ -846,6 +847,13 @@ class ApplicationEngine:
                 not verification.evidence
                 or not verification.evidence.strip()
                 or not context_matches
+                or verified_evidence is None
+                or not verified_evidence.validates_for(
+                    application_id=attempt.application_id,
+                    job_url=attempt.job_url,
+                    attempt_number=attempt.attempt_number,
+                    payload_fingerprint=attempt.payload_fingerprint or "",
+                )
             ):
                 self.tracker.update_automation_status(
                     application.job_url,
@@ -865,7 +873,9 @@ class ApplicationEngine:
 
             self.tracker.mark_submitted(
                 application.job_url,
-                submission_evidence=verification.evidence,
+                verified_evidence=verified_evidence,
+                attempt=attempt,
+                attempts=self.attempts,
             )
             return self._finish(
                 attempt,

@@ -34,6 +34,7 @@ ELEKS_URL = "https://careers.eleks.com/vacancies/local-engine-test/"
 FIXTURES = Path(__file__).parent / "fixtures"
 FORM_FIXTURE = FIXTURES / "eleks_submission.html"
 CONFIRMATION_FIXTURE = FIXTURES / "verification_confirmation.html"
+CONFIRMATION_URL = CONFIRMATION_FIXTURE.resolve().as_uri()
 CONFIRMATION = "Local fixture confirmation: application received"
 
 
@@ -55,15 +56,18 @@ class FixtureSubmitBrowser(InMemoryBrowser):
         self.form_fixture_text = FORM_FIXTURE.read_text(encoding="utf-8")
         self.confirmation_fixture_text = CONFIRMATION_FIXTURE.read_text(encoding="utf-8")
 
-    def submit_form(self, *, approved: bool) -> BrowserSubmissionResult:
+    def submit_form(self, *, authorization=None) -> BrowserSubmissionResult:
         self.operations.append(("submit_form", ()))
-        if approved is not True:
+        if authorization is None or authorization.failure_reason():
+            return BrowserSubmissionResult(outcome=BrowserSubmissionOutcome.not_started)
+        if authorization.begin_browser_action():
             return BrowserSubmissionResult(outcome=BrowserSubmissionOutcome.not_started)
         self.submit_calls += 1
         self.claim_was_active_at_submit = self.attempt_store.has_submission_in_progress(
             self.application_id
         )
         assert self.claim_was_active_at_submit
+        before_url, before_body = self.page.url, self.page.body_text
         assert 'name="full_name"' in self.form_fixture_text
         if self.fail_after_start:
             raise BrowserInteractionError("Local fixture browser failed after dispatch")
@@ -76,13 +80,9 @@ class FixtureSubmitBrowser(InMemoryBrowser):
                 "form_found": False,
             }
         )
-        attempt = self.attempt_store.latest_for(self.application_id)
-        if attempt is not None:
-            self.page = self.page.model_copy(update={
-                "confirmation_application_id": attempt.application_id,
-                "confirmation_job_url": attempt.job_url,
-                "confirmation_attempt_number": attempt.attempt_number,
-            })
+        self._record_observation(
+            authorization, before_url=before_url, before_body=before_body
+        )
         return BrowserSubmissionResult(
             outcome=BrowserSubmissionOutcome.submitted,
             message="Local fixture submission action",
@@ -134,7 +134,9 @@ def make_engine(tmp_path: Path, *, fail_after_start=False, challenge=None, honey
     adapter = EleksAdapter(
         browser,
         verifier=VisibleConfirmationTextVerifier(
-            browser, confirmation_marker=CONFIRMATION
+            browser,
+            confirmation_marker=CONFIRMATION,
+            trusted_confirmation_urls={CONFIRMATION_URL},
         ),
         attempt_store=attempts,
     )
@@ -219,7 +221,9 @@ def test_engine_records_unknown_eleks_result_and_blocks_automatic_retry(tmp_path
     restarted_adapter = EleksAdapter(
         restarted_browser,
         verifier=VisibleConfirmationTextVerifier(
-            restarted_browser, confirmation_marker=CONFIRMATION
+            restarted_browser,
+            confirmation_marker=CONFIRMATION,
+            trusted_confirmation_urls={CONFIRMATION_URL},
         ),
         attempt_store=reloaded_attempts,
     )

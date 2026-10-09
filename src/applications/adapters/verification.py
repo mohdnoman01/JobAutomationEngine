@@ -7,13 +7,13 @@ from src.applications.adapters.base import (
     SubmissionEvidence,
 )
 from src.applications.adapters.browser import BrowserAutomation
+from src.applications.evidence import VerifiedSubmissionEvidence
 from src.applications.submission import (
     ApplicationAttempt,
     ApplicationResultStatus,
     SubmissionVerification,
     VerificationOutcome,
 )
-from src.research.job_normalizer import normalize_job_url
 
 
 class SubmissionVerifier(Protocol):
@@ -35,15 +35,19 @@ class VisibleConfirmationTextVerifier:
         browser: BrowserAutomation,
         *,
         confirmation_marker: str | None,
+        trusted_confirmation_urls: set[str] | None = None,
     ) -> None:
         self.browser = browser
         self.confirmation_marker = (
             confirmation_marker.strip() if confirmation_marker else None
         )
+        self.trusted_confirmation_urls = frozenset(trusted_confirmation_urls or set())
 
     def verify(self, *, attempt: ApplicationAttempt) -> AdapterVerificationResult:
         if not self.confirmation_marker:
             return self._unknown("No adapter confirmation marker is configured.")
+        if not self.trusted_confirmation_urls:
+            return self._unknown("No trusted confirmation URL is configured.")
 
         try:
             page = self.browser.inspect_result()
@@ -63,15 +67,21 @@ class VisibleConfirmationTextVerifier:
             return self._unknown(
                 "The configured confirmation evidence was not present on the page."
             )
+        observation = page.observation
         if (
-            page.confirmation_application_id != attempt.application_id
-            or page.confirmation_job_url is None
-            or normalize_job_url(page.confirmation_job_url)
-            != normalize_job_url(attempt.job_url)
-            or page.confirmation_attempt_number != attempt.attempt_number
+            observation is None
+            or page.url not in self.trusted_confirmation_urls
+            or observation.observed_url != page.url
+            or not attempt.payload_fingerprint
+            or not observation.matches(
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
+                payload_fingerprint=attempt.payload_fingerprint,
+            )
         ):
             return self._unknown(
-                "Confirmation text was not bound to the current application attempt."
+                "Confirmation lacks trusted URL and browser-observation provenance for the current attempt."
             )
         observed_marker = page.body_text[
             marker_offset : marker_offset + len(self.confirmation_marker)
@@ -82,20 +92,30 @@ class VisibleConfirmationTextVerifier:
             page_url=page.url,
             expected_marker=self.confirmation_marker,
             observed_marker=observed_marker,
-            application_id=attempt.application_id,
-            job_url=attempt.job_url,
-            attempt_number=attempt.attempt_number,
+            application_id=observation.application_id,
+            job_url=observation.job_url,
+            attempt_number=observation.attempt_number,
+            provenance=observation,
+        )
+        verified_evidence = VerifiedSubmissionEvidence(
+            mechanism="visible_confirmation_text",
+            evidence=f"Visible confirmation text matched: {self.confirmation_marker}",
+            application_id=observation.application_id,
+            job_url=observation.job_url,
+            attempt_number=observation.attempt_number,
+            payload_fingerprint=observation.payload_fingerprint,
+            trusted_confirmation_url=page.url,
+            observation=observation,
         )
         return AdapterVerificationResult(
             status=ApplicationResultStatus.submitted,
             verification=SubmissionVerification(
                 outcome=VerificationOutcome.verified,
-                evidence=(
-                    f"Visible confirmation text matched: {self.confirmation_marker}"
-                ),
-                application_id=attempt.application_id,
-                job_url=attempt.job_url,
-                attempt_number=attempt.attempt_number,
+                evidence=verified_evidence.evidence,
+                application_id=observation.application_id,
+                job_url=observation.job_url,
+                attempt_number=observation.attempt_number,
+                verified_evidence=verified_evidence,
             ),
             evidence=evidence,
             message="Submission verified using explicit adapter confirmation evidence.",
