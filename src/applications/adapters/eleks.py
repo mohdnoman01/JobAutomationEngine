@@ -620,11 +620,18 @@ class EleksAdapter(ApplicationAdapter):
                 payload_fingerprint=attempt.payload_fingerprint or "",
             )
         )
+        evidence_persisted = (
+            attempt_context_matches
+            and self.attempt_store.record_verified_evidence(
+                attempt, verification.verification.verified_evidence
+            )
+        )
         if (
             verification.verification.outcome == VerificationOutcome.verified
             and verification.verification.evidence
             and verification.verification.evidence.strip()
             and attempt_context_matches
+            and evidence_persisted
         ):
             self.attempt_store.update(
                 attempt,

@@ -7,8 +7,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from src.applications.evidence import (
+    BrowserObservation,
+    EvidenceObserver,
+    VerifiedSubmissionEvidence,
+)
 from src.research.job_normalizer import normalize_job_url
 
 try:
@@ -68,6 +74,10 @@ class ApplicationAttempt(BaseModel):
     attempt_number: int
     payload_fingerprint: str | None = None
     browser_action_started: bool = False
+    browser_action_id: str | None = None
+    browser_observation: BrowserObservation | None = None
+    verified_evidence_record: VerifiedSubmissionEvidence | None = None
+    verified_evidence_consumed: bool = False
     started_at: datetime
     completed_at: datetime | None = None
     current_step: str = "start"
@@ -85,8 +95,14 @@ class ApplicationAttempt(BaseModel):
 
 
 class AttemptStore:
-    def __init__(self, path: str | Path = "data/output/application_attempts.json") -> None:
+    def __init__(
+        self,
+        path: str | Path = "data/output/application_attempts.json",
+        *,
+        allow_test_fixture_evidence: bool = False,
+    ) -> None:
         self.path = Path(path)
+        self.allow_test_fixture_evidence = allow_test_fixture_evidence
 
     def list(self) -> list[ApplicationAttempt]:
         if not self.path.exists():
@@ -144,7 +160,7 @@ class AttemptStore:
         job_url: str,
         attempt_number: int,
         payload_fingerprint: str,
-    ) -> bool:
+    ) -> str | None:
         """Atomically consume the active claim before the irreversible browser action."""
         with self._locked():
             attempts = self.list()
@@ -158,12 +174,185 @@ class AttemptStore:
                     or item.browser_action_started
                 ):
                     continue
+                browser_action_id = str(uuid4())
                 attempts[index] = item.model_copy(
-                    update={"browser_action_started": True}
+                    update={
+                        "browser_action_started": True,
+                        "browser_action_id": browser_action_id,
+                    }
+                )
+                self._save(attempts)
+                return browser_action_id
+            return None
+
+    def record_browser_observation(self, observation: BrowserObservation) -> bool:
+        """Persist the first observation belonging to a consumed browser action."""
+        if (
+            observation.observer == EvidenceObserver.test_fixture
+            and not self.allow_test_fixture_evidence
+        ):
+            return False
+        with self._locked():
+            attempts = self.list()
+            for index, item in enumerate(attempts):
+                if (
+                    item.application_id != observation.application_id
+                    or normalize_job_url(item.job_url)
+                    != normalize_job_url(observation.job_url)
+                    or item.attempt_number != observation.attempt_number
+                    or item.payload_fingerprint != observation.payload_fingerprint
+                    or item.outcome != AttemptOutcome.submitting
+                    or not item.browser_action_started
+                    or item.browser_action_id != observation.browser_action_id
+                    or item.browser_observation is not None
+                    or item.verified_evidence_record is not None
+                ):
+                    continue
+                attempts[index] = item.model_copy(
+                    update={"browser_observation": observation}
                 )
                 self._save(attempts)
                 return True
             return False
+
+    def record_verified_evidence(
+        self,
+        attempt: ApplicationAttempt,
+        evidence: VerifiedSubmissionEvidence,
+    ) -> bool:
+        """Persist adapter verification only when it matches the stored observation."""
+        with self._locked():
+            attempts = self.list()
+            for index, item in enumerate(attempts):
+                if (
+                    item.application_id != attempt.application_id
+                    or item.attempt_number != attempt.attempt_number
+                    or normalize_job_url(item.job_url) != normalize_job_url(attempt.job_url)
+                    or item.outcome != AttemptOutcome.submitting
+                    or not item.browser_action_started
+                    or item.verified_evidence_consumed
+                    or item.verified_evidence_record is not None
+                    or item.browser_observation is None
+                    or evidence.observation != item.browser_observation
+                    or (
+                        item.browser_observation.observer
+                        == EvidenceObserver.test_fixture
+                        and not self.allow_test_fixture_evidence
+                    )
+                    or not evidence.validates_for(
+                        application_id=item.application_id,
+                        job_url=item.job_url,
+                        attempt_number=item.attempt_number,
+                        payload_fingerprint=item.payload_fingerprint or "",
+                    )
+                ):
+                    continue
+                attempts[index] = item.model_copy(
+                    update={"verified_evidence_record": evidence}
+                )
+                self._save(attempts)
+                return True
+            return False
+
+    def consume_verified_evidence(
+        self,
+        attempt: ApplicationAttempt,
+        evidence: VerifiedSubmissionEvidence,
+    ) -> bool:
+        """Atomically consume exact persisted evidence for one completion."""
+        with self._locked():
+            attempts = self.list()
+            for index, item in enumerate(attempts):
+                if (
+                    item.application_id != attempt.application_id
+                    or normalize_job_url(item.job_url) != normalize_job_url(attempt.job_url)
+                    or item.attempt_number != attempt.attempt_number
+                    or item.payload_fingerprint != attempt.payload_fingerprint
+                    or item.outcome
+                    not in {AttemptOutcome.submitting, AttemptOutcome.submitted}
+                    or not item.browser_action_started
+                    or not item.browser_action_id
+                    or item.browser_observation is None
+                    or item.verified_evidence_record != evidence
+                    or item.verified_evidence_consumed
+                    or (
+                        item.browser_observation.observer
+                        == EvidenceObserver.test_fixture
+                        and not self.allow_test_fixture_evidence
+                    )
+                    or not evidence.validates_for(
+                        application_id=item.application_id,
+                        job_url=item.job_url,
+                        attempt_number=item.attempt_number,
+                        payload_fingerprint=item.payload_fingerprint or "",
+                    )
+                    or (
+                        item.outcome == AttemptOutcome.submitted
+                        and (
+                            item.verification_result is not True
+                            or not item.verification_evidence
+                        )
+                    )
+                ):
+                    continue
+                attempts[index] = item.model_copy(
+                    update={"verified_evidence_consumed": True}
+                )
+                self._save(attempts)
+                return True
+            return False
+
+    def matches_consumed_verified_evidence(
+        self,
+        attempt: ApplicationAttempt,
+        evidence: VerifiedSubmissionEvidence,
+    ) -> bool:
+        return self.matches_persisted_verified_evidence(
+            attempt, evidence, consumed=True
+        )
+
+    def matches_persisted_verified_evidence(
+        self,
+        attempt: ApplicationAttempt,
+        evidence: VerifiedSubmissionEvidence,
+        *,
+        consumed: bool | None = False,
+    ) -> bool:
+        """Match evidence persisted for this action, optionally requiring consumption."""
+        with self._locked():
+            return any(
+                item.application_id == attempt.application_id
+                and item.attempt_number == attempt.attempt_number
+                and normalize_job_url(item.job_url) == normalize_job_url(attempt.job_url)
+                and item.payload_fingerprint == attempt.payload_fingerprint
+                and item.outcome in {AttemptOutcome.submitting, AttemptOutcome.submitted}
+                and item.browser_action_started
+                and bool(item.browser_action_id)
+                and item.browser_observation is not None
+                and (
+                    consumed is None
+                    or item.verified_evidence_consumed is consumed
+                )
+                and item.verified_evidence_record == evidence
+                and not (
+                    item.browser_observation.observer == EvidenceObserver.test_fixture
+                    and not self.allow_test_fixture_evidence
+                )
+                and evidence.validates_for(
+                    application_id=item.application_id,
+                    job_url=item.job_url,
+                    attempt_number=item.attempt_number,
+                    payload_fingerprint=item.payload_fingerprint or "",
+                )
+                and (
+                    item.outcome != AttemptOutcome.submitted
+                    or (
+                        item.verification_result is True
+                        and bool(item.verification_evidence)
+                    )
+                )
+                for item in self.list()
+            )
 
     def start(
         self,

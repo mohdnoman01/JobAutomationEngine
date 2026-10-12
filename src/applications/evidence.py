@@ -17,6 +17,7 @@ class BrowserObservation(BaseModel):
 
     observer: EvidenceObserver
     observation_id: str
+    browser_action_id: str
     observed_url: str
     application_id: str
     job_url: str
@@ -33,6 +34,7 @@ class BrowserObservation(BaseModel):
             and self.attempt_number == attempt_number
             and self.payload_fingerprint == payload_fingerprint
             and bool(self.observation_id.strip())
+            and bool(self.browser_action_id.strip())
             and self.action_started
             and self.page_changed_after_action
         )

@@ -73,6 +73,7 @@ class FakeAdapter:
         self.error = error
         self.submit_calls = 0
         self.fill_calls = 0
+        self.attempts = None
 
     def can_handle(self, job):
         return job.source == self.platform
@@ -91,6 +92,28 @@ class FakeAdapter:
         self.submit_calls += 1
         if self.error:
             raise self.error
+        attempt = self.attempts.latest_for(payload.application_id)
+        browser_action_id = self.attempts.begin_browser_submission_action(
+            application_id=attempt.application_id,
+            job_url=attempt.job_url,
+            attempt_number=attempt.attempt_number,
+            payload_fingerprint=payload.fingerprint(),
+        )
+        assert browser_action_id is not None
+        assert self.attempts.record_browser_observation(
+            BrowserObservation(
+                observer=EvidenceObserver.test_fixture,
+                observation_id=f"test-{attempt.application_id}-{attempt.attempt_number}",
+                browser_action_id=browser_action_id,
+                observed_url="fixture://confirmation",
+                application_id=attempt.application_id,
+                job_url=attempt.job_url,
+                attempt_number=attempt.attempt_number,
+                payload_fingerprint=payload.fingerprint(),
+                action_started=True,
+                page_changed_after_action=True,
+            )
+        )
         return self.receipt
 
     def fill(self, payload):
@@ -99,18 +122,8 @@ class FakeAdapter:
 
     def verify_result(self, payload, receipt, *, attempt):
         if self.fixture_verification:
-            observation = BrowserObservation(
-                observer=EvidenceObserver.test_fixture,
-                observation_id=f"test-{attempt.application_id}-{attempt.attempt_number}",
-                observed_url="fixture://confirmation",
-                application_id=attempt.application_id,
-                job_url=attempt.job_url,
-                attempt_number=attempt.attempt_number,
-                payload_fingerprint=attempt.payload_fingerprint,
-                action_started=True,
-                page_changed_after_action=True,
-            )
-            return self.verification.model_copy(
+            observation = self.attempts.latest_for(attempt.application_id).browser_observation
+            verification = self.verification.model_copy(
                 update={
                     "application_id": attempt.application_id,
                     "job_url": attempt.job_url,
@@ -127,12 +140,20 @@ class FakeAdapter:
                     ),
                 }
             )
+            assert self.attempts.record_verified_evidence(
+                attempt, verification.verified_evidence
+            )
+            return verification
         return self.verification
 
 
 def make_engine(tmp_path, adapter=None):
     tracker = ApplicationTracker(tmp_path / "applications.json")
-    attempts = AttemptStore(tmp_path / "attempts.json")
+    attempts = AttemptStore(
+        tmp_path / "attempts.json", allow_test_fixture_evidence=True
+    )
+    if adapter is not None:
+        adapter.attempts = attempts
     application = tracker.create(
         company="Test Startup",
         job_title="Android Engineer",
@@ -794,6 +815,81 @@ def test_attempt_persistence_round_trips_and_recovery_lists_records(tmp_path):
 
     assert loaded == attempt
     assert RecoveryQueue(store).retryable() == [attempt]
+
+
+def test_engine_recovers_consumed_tracker_transition_without_adapter_retry(
+    tmp_path, monkeypatch
+):
+    import src.applications.tracker as tracker_module
+
+    tracker, attempts, application, engine = make_engine(tmp_path, FakeAdapter())
+    tracker.update_status(application.job_url, ApplicationStatus.ready)
+    tracker.update_automation_status(application.job_url, AutomationStatus.preparing)
+    tracker.update_automation_status(
+        application.job_url, AutomationStatus.ready_to_submit
+    )
+    tracker.update_automation_status(application.job_url, AutomationStatus.submitting)
+    attempt = attempts.claim_submission(
+        application_id=application_id_for(application.job_url),
+        company=application.company,
+        job_title=application.job_title,
+        job_url=application.job_url,
+        platform="test_platform",
+        payload_fingerprint="recovery-payload",
+    )
+    browser_action_id = attempts.begin_browser_submission_action(
+        application_id=attempt.application_id,
+        job_url=attempt.job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+    )
+    observation = BrowserObservation(
+        observer=EvidenceObserver.test_fixture,
+        observation_id="engine-recovery-observation",
+        browser_action_id=browser_action_id,
+        observed_url="fixture://confirmation",
+        application_id=attempt.application_id,
+        job_url=attempt.job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+        action_started=True,
+        page_changed_after_action=True,
+    )
+    assert attempts.record_browser_observation(observation)
+    evidence = VerifiedSubmissionEvidence(
+        mechanism="test_fixture",
+        evidence="Local fixture confirmation",
+        application_id=attempt.application_id,
+        job_url=attempt.job_url,
+        attempt_number=attempt.attempt_number,
+        payload_fingerprint=attempt.payload_fingerprint,
+        trusted_confirmation_url=observation.observed_url,
+        observation=observation,
+    )
+    assert attempts.record_verified_evidence(attempt, evidence)
+
+    def fail_tracker_write(*args, **kwargs):
+        raise OSError("simulated interruption after evidence consumption")
+
+    monkeypatch.setattr(tracker_module, "save_applications", fail_tracker_write)
+    with pytest.raises(OSError):
+        tracker.mark_submitted(
+            application.job_url,
+            verified_evidence=evidence,
+            attempt=attempt,
+            attempts=attempts,
+        )
+    monkeypatch.undo()
+
+    result = engine.process(
+        application,
+        make_job(),
+        ApplicationProfile(name="Test Person"),
+    )
+
+    assert result.status == ApplicationResultStatus.duplicate_submission_blocked
+    assert tracker.get(application.job_url).status == ApplicationStatus.applied
+    assert engine.adapters[0].submit_calls == 0
 
 
 def test_persistent_submission_claim_blocks_recreation_and_unknown_retry(tmp_path):

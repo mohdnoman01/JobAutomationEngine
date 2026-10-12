@@ -84,7 +84,9 @@ def test_browser_submission_requires_matching_approval_and_live_persisted_claim(
         fields={"name": "Candidate"},
     )
     approval = ReviewApproval.approve(payload, job_url=job_url)
-    store = AttemptStore(tmp_path / "attempts.json")
+    store = AttemptStore(
+        tmp_path / "attempts.json", allow_test_fixture_evidence=True
+    )
     started = store.start(
         application_id=application_id,
         company="Example",
@@ -108,6 +110,7 @@ def test_browser_submission_requires_matching_approval_and_live_persisted_claim(
     )
     assert valid_authorization.failure_reason() is None
     assert browser.submit_form(authorization=valid_authorization).action_started
+    assert store.latest_for(application_id).browser_observation is not None
     assert browser.submit_form(authorization=valid_authorization).outcome == BrowserSubmissionOutcome.not_started
 
     stale_payload = payload.model_copy(update={"fields": {"name": "Changed"}})
@@ -162,4 +165,4 @@ def test_persistent_browser_action_claim_is_atomic(tmp_path):
         claimed = list(
             executor.map(lambda item: item.begin_browser_submission_action(**args), stores)
         )
-    assert sum(claimed) == 1
+    assert sum(result is not None for result in claimed) == 1

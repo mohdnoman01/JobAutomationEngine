@@ -3,9 +3,9 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from uuid import uuid4
 
 from src.applications.evidence import BrowserObservation, EvidenceObserver
 from src.applications.recovery import ApplicationAttempt, AttemptStore, AttemptOutcome
@@ -76,6 +76,7 @@ class BrowserSubmissionAuthorization(BaseModel):
     payload: ApplicationPayload
     attempt: ApplicationAttempt
     attempt_store: AttemptStore = Field(exclude=True)
+    browser_action_id: str | None = None
 
     def failure_reason(self) -> str | None:
         if not self.approval.validates(self.payload, self.payload.job_url):
@@ -107,13 +108,15 @@ class BrowserSubmissionAuthorization(BaseModel):
         failure = self.failure_reason()
         if failure:
             return failure
-        if not self.attempt_store.begin_browser_submission_action(
+        browser_action_id = self.attempt_store.begin_browser_submission_action(
             application_id=self.attempt.application_id,
             job_url=self.attempt.job_url,
             attempt_number=self.attempt.attempt_number,
             payload_fingerprint=self.payload.fingerprint(),
-        ):
+        )
+        if browser_action_id is None:
             return "The persistent submission claim is missing or already consumed."
+        self.browser_action_id = browser_action_id
         return None
 
 
@@ -444,6 +447,7 @@ class PlaywrightBrowser:
         self._submission_observation = BrowserObservation(
             observer=EvidenceObserver.playwright_browser,
             observation_id=str(uuid4()),
+            browser_action_id=authorization.browser_action_id or "",
             observed_url=observed_url,
             application_id=authorization.attempt.application_id,
             job_url=authorization.attempt.job_url,
@@ -453,6 +457,9 @@ class PlaywrightBrowser:
             page_changed_after_action=(
                 observed_url != before_url or after_body != before_body
             ),
+        )
+        authorization.attempt_store.record_browser_observation(
+            self._submission_observation
         )
 
     def _field_locator(self, key: str):
@@ -618,6 +625,7 @@ class InMemoryBrowser:
         self.page.observation = BrowserObservation(
             observer=EvidenceObserver.test_fixture,
             observation_id=str(uuid4()),
+            browser_action_id=authorization.browser_action_id or "",
             observed_url=self.page.url,
             application_id=authorization.attempt.application_id,
             job_url=authorization.attempt.job_url,
@@ -628,6 +636,7 @@ class InMemoryBrowser:
                 self.page.url != before_url or self.page.body_text != before_body
             ),
         )
+        authorization.attempt_store.record_browser_observation(self.page.observation)
 
     def inspect_result(self) -> BrowserPageSnapshot:
         self._record("inspect_result")

@@ -52,6 +52,7 @@ def with_fixture_observation(page, attempt, *, job_url=None, number=None):
     observation = BrowserObservation(
         observer=EvidenceObserver.test_fixture,
         observation_id="fixture-observation",
+        browser_action_id="fixture-browser-action",
         observed_url=page.url,
         application_id=attempt.application_id,
         job_url=job_url or attempt.job_url,
@@ -285,7 +286,12 @@ def test_explicit_verification_can_complete_existing_engine_lifecycle(tmp_path):
             )
 
         def verify_result(self, payload, receipt, *, attempt):
-            return self.verifier.verify(attempt=attempt).verification
+            verification = self.verifier.verify(attempt=attempt).verification
+            if verification.verified_evidence is not None:
+                assert self.attempts.record_verified_evidence(
+                    attempt, verification.verified_evidence
+                )
+            return verification
 
     confirmation_url = "file:///local/confirmation.html"
     result_page = BrowserPageSnapshot(
@@ -298,7 +304,9 @@ def test_explicit_verification_can_complete_existing_engine_lifecycle(tmp_path):
         result_page=result_page,
     )
     tracker = ApplicationTracker(tmp_path / "applications.json")
-    attempts = AttemptStore(tmp_path / "attempts.json")
+    attempts = AttemptStore(
+        tmp_path / "attempts.json", allow_test_fixture_evidence=True
+    )
     adapter = FixtureAdapter(browser, attempts, confirmation_url)
     job = Job(
         title="Fixture role",

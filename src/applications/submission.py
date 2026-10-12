@@ -453,6 +453,12 @@ class ApplicationEngine:
         persisted_application = self.tracker.get(application.job_url)
         if persisted_application is None:
             raise ValueError(f"Application not found for job URL: {application.job_url}")
+        self.tracker.recover_consumed_submission(
+            application.job_url, attempts=self.attempts
+        )
+        persisted_application = self.tracker.get(application.job_url)
+        if persisted_application is None:
+            raise ValueError(f"Application not found for job URL: {application.job_url}")
         application = persisted_application
         application_id = application_id_for(application.job_url)
         previous = self.attempts.latest_for(application_id)

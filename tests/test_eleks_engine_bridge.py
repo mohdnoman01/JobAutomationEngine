@@ -122,7 +122,9 @@ def make_page(*, challenge=None, honeypot=False):
 
 
 def make_engine(tmp_path: Path, *, fail_after_start=False, challenge=None, honeypot=False):
-    attempts = AttemptStore(tmp_path / "attempts.json")
+    attempts = AttemptStore(
+        tmp_path / "attempts.json", allow_test_fixture_evidence=True
+    )
     application_id = application_id_for(ELEKS_URL)
     browser = FixtureSubmitBrowser(
         make_page(challenge=challenge, honeypot=honeypot),
@@ -211,7 +213,9 @@ def test_engine_records_unknown_eleks_result_and_blocks_automatic_retry(tmp_path
     assert RecoveryQueue(attempts).list()[-1].outcome.value == "unknown_submission_result"
 
     # Simulate process restart: reload both stores and use a fresh adapter/bridge.
-    reloaded_attempts = AttemptStore(tmp_path / "attempts.json")
+    reloaded_attempts = AttemptStore(
+        tmp_path / "attempts.json", allow_test_fixture_evidence=True
+    )
     reloaded_tracker = ApplicationTracker(tmp_path / "applications.json")
     restarted_browser = FixtureSubmitBrowser(
         make_page(),
